@@ -1,0 +1,8 @@
+[package]
+name = "grepo"
+version = "0.0.1"
+edition = "2024"
+description = "Placeholder crate to reserve the grepo name."
+license = "MIT"
+
+[dependencies]
