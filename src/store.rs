@@ -28,19 +28,19 @@ impl Store {
         }
     }
 
-    pub fn snapshots_dir(&self) -> PathBuf {
+    fn snapshots_dir(&self) -> PathBuf {
         self.cache_root.join("snapshots")
     }
 
-    pub fn remotes_dir(&self) -> PathBuf {
+    fn remotes_dir(&self) -> PathBuf {
         self.cache_root.join("remotes")
     }
 
-    pub fn roots_dir(&self) -> PathBuf {
+    fn roots_dir(&self) -> PathBuf {
         self.state_root.join("roots")
     }
 
-    pub fn prepare(&self) -> Result<()> {
+    pub(crate) fn prepare(&self) -> Result<()> {
         ensure_dir(&self.snapshots_dir())?;
         ensure_dir(&self.remotes_dir())?;
         ensure_dir(&self.roots_dir())?;
@@ -48,7 +48,6 @@ impl Store {
     }
 
     pub fn ensure_remote_cache(&self, git: &Git, url: &str) -> Result<PathBuf> {
-        self.prepare()?;
         let remote_key = git.hash_string(url)?;
         let remote_dir = self.remotes_dir().join(format!("{remote_key}.git"));
         git.ensure_remote_cache(&remote_dir, url)?;
@@ -61,7 +60,6 @@ impl Store {
         url: &str,
         commit: &str,
     ) -> Result<PathBuf> {
-        self.prepare()?;
         let remote_key = git.hash_string(url)?;
         let snapshot_key = git.hash_string(&format!("{url}\n{commit}"))?;
         let snapshot_dir = self.snapshots_dir().join(&remote_key).join(&snapshot_key);
@@ -77,7 +75,6 @@ impl Store {
     }
 
     pub fn refresh_root(&self, git: &Git, lock_path: &Path) -> Result<PathBuf> {
-        self.prepare()?;
         let canonical = lock_path
             .canonicalize()
             .unwrap_or_else(|_| lock_path.to_path_buf());
@@ -91,7 +88,6 @@ impl Store {
     }
 
     pub fn gc(&self, git: &Git) -> Result<GcReport> {
-        self.prepare()?;
         let mut report = GcReport::default();
         let mut reachable_snapshots = BTreeSet::new();
         let mut reachable_remotes = BTreeSet::new();
@@ -109,10 +105,7 @@ impl Store {
             };
 
             let lockfile = Lockfile::load(&lock_path)?;
-            for alias in lockfile.aliases() {
-                let Some(repo) = lockfile.get(&alias) else {
-                    continue;
-                };
+            for repo in lockfile.entries() {
                 let Some(commit) = &repo.commit else {
                     continue;
                 };
@@ -156,8 +149,7 @@ impl Store {
 }
 
 pub fn replace_symlink(link_path: &Path, target: &Path) -> Result<()> {
-    if link_path.exists() {
-        let metadata = fs::symlink_metadata(link_path)?;
+    if let Some(metadata) = symlink_metadata_if_exists(link_path)? {
         if !metadata.file_type().is_symlink() {
             return Err(err(format!(
                 "path collision at {}: expected a symlink managed by grepo",
@@ -178,12 +170,11 @@ pub fn replace_symlink(link_path: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_managed_symlink(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
+pub fn remove_managed_symlink(path: &Path) -> Result<()> {
+    let Some(metadata) = symlink_metadata_if_exists(path)? else {
+        return Ok(());
+    };
 
-    let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_symlink() {
         return Err(err(format!(
             "path collision at {}: expected a symlink managed by grepo",
@@ -192,7 +183,7 @@ pub fn remove_managed_symlink(path: &Path) -> Result<bool> {
     }
 
     fs::remove_file(path)?;
-    Ok(true)
+    Ok(())
 }
 
 fn make_read_only(root: &Path) -> Result<()> {
@@ -240,13 +231,18 @@ fn make_writable(root: &Path) -> Result<()> {
 }
 
 fn read_dir_paths(path: &Path) -> Result<Vec<PathBuf>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
     let mut entries = Vec::new();
     for entry in fs::read_dir(path)? {
         entries.push(entry?.path());
     }
     entries.sort();
     Ok(entries)
+}
+
+fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }

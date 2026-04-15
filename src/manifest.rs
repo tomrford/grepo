@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -41,10 +41,6 @@ pub struct Lockfile {
 }
 
 impl Lockfile {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
     pub fn load(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
             .map_err(|error| err(format!("failed to read {}: {error}", path.display())))?;
@@ -52,7 +48,7 @@ impl Lockfile {
     }
 
     pub fn parse(contents: &str) -> Result<Self> {
-        let mut lockfile = Self::empty();
+        let mut lockfile = Self::default();
         let mut current_alias: Option<String> = None;
         let mut current_entry: Option<LockEntry> = None;
 
@@ -154,8 +150,8 @@ impl Lockfile {
         self.repos.keys().cloned().collect()
     }
 
-    pub fn alias_set(&self) -> BTreeSet<String> {
-        self.repos.keys().cloned().collect()
+    pub fn entries(&self) -> impl Iterator<Item = &LockEntry> {
+        self.repos.values()
     }
 
     pub fn select_aliases(&self, aliases: &[String]) -> Result<Vec<String>> {
@@ -267,7 +263,7 @@ commit = "def"
 
     #[test]
     fn renders_canonical_format() {
-        let mut lockfile = Lockfile::empty();
+        let mut lockfile = Lockfile::default();
         let mut entry = LockEntry::new("mint".into(), "git@github.com:tomrford/mint.git".into());
         entry.ref_name = Some("main".into());
         entry.commit = Some("abc".into());

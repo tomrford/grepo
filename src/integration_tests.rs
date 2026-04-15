@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -201,6 +202,166 @@ fn gc_prunes_unreachable_snapshots_and_remotes_from_rooted_lockfiles() {
     assert!(!stale_remote.exists());
 }
 
+#[test]
+fn remove_deletes_dangling_managed_symlink() {
+    let root = TestDir::new("remove-dangling");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["add", "docs", remote.to_str().unwrap()],
+    )
+    .unwrap();
+
+    let link = workspace.join("grepo/docs");
+    let snapshot = fs::canonicalize(&link).unwrap();
+    make_tree_writable(&snapshot);
+    fs::remove_dir_all(&snapshot).unwrap();
+
+    let code = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["remove", "docs"],
+    )
+    .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert!(!link.exists());
+    assert!(
+        !fs::symlink_metadata(&link)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn sync_prunes_dangling_symlinks_in_tool_owned_dir() {
+    let root = TestDir::new("sync-dangling");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&workspace).unwrap();
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+
+    let link = workspace.join("grepo/manual");
+    symlink(workspace.join("missing"), &link).unwrap();
+
+    let code = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["sync"],
+    )
+    .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert!(
+        !fs::symlink_metadata(&link)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn add_rejects_leading_dot_aliases() {
+    let root = TestDir::new("dot-alias");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+
+    let error = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["add", ".lock", remote.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert_eq!(format!("{error}"), "invalid alias: .lock");
+    assert!(!workspace.join("grepo").exists());
+}
+
+#[test]
+fn remove_reports_missing_alias_cleanly() {
+    let root = TestDir::new("remove-missing");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&workspace).unwrap();
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+
+    let error = run_for_test(
+        workspace,
+        cache_root,
+        state_root,
+        "git".into(),
+        &["remove", "docs"],
+    )
+    .unwrap_err();
+    assert_eq!(format!("{error}"), "alias not found: docs");
+}
+
+#[test]
+fn sync_recovers_stale_mutation_lock() {
+    let root = TestDir::new("stale-lock");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&workspace).unwrap();
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+    fs::write(workspace.join("grepo/.mutate.lock"), "999999\n").unwrap();
+
+    let code = run_for_test(
+        workspace.clone(),
+        cache_root,
+        state_root,
+        "git".into(),
+        &["sync"],
+    )
+    .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert!(!workspace.join("grepo/.mutate.lock").exists());
+}
+
 fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str) {
     git(None, &["init", "--bare", remote.to_str().unwrap()]);
     git(
@@ -232,4 +393,25 @@ fn git(cwd: Option<&Path>, args: &[&str]) {
     }
     let status = command.args(args).status().unwrap();
     assert!(status.success(), "git {:?} failed", args);
+}
+
+fn make_tree_writable(root: &Path) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        if file_type.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+        }
+    }
 }

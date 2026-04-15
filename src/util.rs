@@ -80,7 +80,7 @@ pub fn unique_path(parent: &Path, prefix: &str) -> PathBuf {
     parent.join(format!("{prefix}-{pid}-{nanos}"))
 }
 
-pub fn format_command(program: &OsStr, args: &[OsString]) -> String {
+fn format_command(program: &OsStr, args: &[OsString]) -> String {
     let mut rendered = program.to_string_lossy().into_owned();
     for arg in args {
         rendered.push(' ');
@@ -162,13 +162,14 @@ impl CommandOutput {
     }
 }
 
-pub fn shell_escape(value: &str) -> String {
+fn shell_escape(value: &str) -> String {
     let escaped = value.replace('\'', "'\"'\"'");
     format!("'{escaped}'")
 }
 
 pub fn is_valid_alias(alias: &str) -> bool {
     !alias.is_empty()
+        && !alias.starts_with('.')
         && alias
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))

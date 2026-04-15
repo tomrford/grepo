@@ -133,7 +133,7 @@ Default behavior with no flags is:
 - realizes the commits already locked in `grepo/.lock`
 - fills missing commits only when an entry has `track = "default"` or `ref = "..."`
 - creates or updates `grepo/<alias>` symlinks
-- removes leftover managed symlinks not present in the lockfile
+- removes leftover non-hidden symlinks under `grepo/` that are not present in the lockfile
 
 `sync` does not advance moving refs when a commit is already locked.
 
@@ -219,7 +219,7 @@ Important defaults:
 - no recursive submodules
 - no Git LFS handling
 - no `.git` directory in snapshots
-- no overwrite of user-created collisions in `grepo/`
+- `grepo/` is a tool-owned namespace for non-hidden symlinks; `sync`, `add`, and `update` may replace or prune them
 
 ## Future work, if the tool proves useful
 

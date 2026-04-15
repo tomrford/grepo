@@ -1,6 +1,7 @@
 mod app;
 mod git;
 mod manifest;
+mod mutation_lock;
 mod store;
 mod util;
 

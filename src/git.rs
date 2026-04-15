@@ -220,21 +220,20 @@ impl Git {
         Ok(output.status.success())
     }
 
-    fn base_args<const N: usize>(&self, tail: [OsString; N]) -> Vec<OsString> {
-        let mut args = Vec::with_capacity(N + 2);
+    fn base_args(&self, tail: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+        let mut args = Vec::new();
         args.push(OsString::from("-c"));
         args.push(OsString::from("core.hooksPath=/dev/null"));
         args.extend(tail);
         args
     }
 
-    fn git_dir_args<const N: usize>(&self, git_dir: &Path, tail: [OsString; N]) -> Vec<OsString> {
-        let mut args = self.base_args([
-            OsString::from(format!("--git-dir={}", git_dir.display())),
-            OsString::new(),
-        ]);
-        let blank = args.pop();
-        debug_assert!(blank.as_deref() == Some(OsStr::new("")));
+    fn git_dir_args(
+        &self,
+        git_dir: &Path,
+        tail: impl IntoIterator<Item = OsString>,
+    ) -> Vec<OsString> {
+        let mut args = self.base_args([OsString::from(format!("--git-dir={}", git_dir.display()))]);
         args.extend(tail);
         args
     }

@@ -10,6 +10,7 @@ Current shape:
 - `grepo/.lock` is the tracked source of truth.
 - `grepo/.gitignore` keeps only `.lock` and `.gitignore` tracked.
 - `grepo/<alias>` are generated symlinks.
+- non-hidden symlinks under `grepo/` are tool-managed and may be replaced or pruned by `sync`.
 - `grepo add` eagerly resolves and syncs the new entry.
 - `grepo sync` realizes locked commits exactly.
 - `grepo update` advances default-branch or named-ref entries and can target specific aliases.

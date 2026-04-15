@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::git::{Git, ResolveSpec};
 use crate::manifest::{LockEntry, Lockfile, TrackMode};
+use crate::mutation_lock::MutationLock;
 use crate::store::{GcReport, Store, remove_managed_symlink, replace_symlink};
 use crate::util::{
     Result, cache_root, current_dir, ensure_dir, err, is_valid_alias, state_root, write_atomic,
@@ -54,17 +54,6 @@ struct ProjectRoot {
     lock_path: PathBuf,
 }
 
-struct MutationLock {
-    path: PathBuf,
-    _file: fs::File,
-}
-
-impl Drop for MutationLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 impl ProjectRoot {
     fn discover(start: &Path) -> Option<Self> {
         for dir in start.ancestors() {
@@ -104,24 +93,13 @@ impl ProjectRoot {
 
     fn load_lockfile(&self) -> Result<Lockfile> {
         if !self.lock_path.exists() {
-            return Ok(Lockfile::empty());
+            return Ok(Lockfile::default());
         }
         Lockfile::load(&self.lock_path)
     }
 
     fn lock_mutation(&self) -> Result<MutationLock> {
-        let path = self.grepo_dir.join(".mutate.lock");
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                err(format!(
-                    "another grepo command is already mutating {}: {error}",
-                    self.grepo_dir.display()
-                ))
-            })?;
-        Ok(MutationLock { path, _file: file })
+        MutationLock::acquire(&self.grepo_dir)
     }
 }
 
@@ -240,9 +218,8 @@ impl Command {
 fn init(context: &AppContext) -> Result<ExitCode> {
     let root = ProjectRoot::create_at(&context.cwd)?;
     let _lock = root.lock_mutation()?;
-    context
-        .store()
-        .refresh_root(&context.git, &root.lock_path)?;
+    let store = prepared_store(context)?;
+    store.refresh_root(&context.git, &root.lock_path)?;
     println!("initialized {}", root.grepo_dir.display());
     Ok(ExitCode::SUCCESS)
 }
@@ -253,6 +230,7 @@ fn add(context: &AppContext, args: AddArgs) -> Result<ExitCode> {
         None => ProjectRoot::create_at(&context.cwd)?,
     };
     let _lock = root.lock_mutation()?;
+    let store = prepared_store(context)?;
 
     let mut lockfile = root.load_lockfile()?;
     let mut entry = LockEntry::new(args.alias.clone(), args.url);
@@ -265,12 +243,10 @@ fn add(context: &AppContext, args: AddArgs) -> Result<ExitCode> {
         entry.track = TrackMode::DefaultBranch;
     }
 
-    let (entry, snapshot_path) = realize_entry(context, &entry, false)?;
+    let (entry, snapshot_path) = realize_entry(context, &store, &entry, false)?;
     lockfile.upsert(entry);
     lockfile.write(&root.lock_path)?;
-    context
-        .store()
-        .refresh_root(&context.git, &root.lock_path)?;
+    store.refresh_root(&context.git, &root.lock_path)?;
     replace_symlink(&root.grepo_dir.join(&args.alias), &snapshot_path)?;
     println!("synced {} -> {}", args.alias, snapshot_path.display());
     Ok(ExitCode::SUCCESS)
@@ -279,18 +255,17 @@ fn add(context: &AppContext, args: AddArgs) -> Result<ExitCode> {
 fn remove(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
+    let store = prepared_store(context)?;
     let mut lockfile = root.load_lockfile()?;
 
     for alias in aliases {
         if !lockfile.remove(alias) {
-            return Err(err(format!("alias not found in {}", alias)));
+            return Err(err(format!("alias not found: {alias}")));
         }
     }
 
     lockfile.write(&root.lock_path)?;
-    context
-        .store()
-        .refresh_root(&context.git, &root.lock_path)?;
+    store.refresh_root(&context.git, &root.lock_path)?;
 
     let mut failed = false;
     for alias in aliases {
@@ -310,6 +285,7 @@ fn remove(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
 fn sync(context: &AppContext) -> Result<ExitCode> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
+    let store = prepared_store(context)?;
     let mut lockfile = root.load_lockfile()?;
     let mut failed = false;
     let mut dirty_lock = false;
@@ -318,7 +294,7 @@ fn sync(context: &AppContext) -> Result<ExitCode> {
         let Some(entry) = lockfile.get(&alias).cloned() else {
             continue;
         };
-        match realize_entry(context, &entry, false) {
+        match realize_entry(context, &store, &entry, false) {
             Ok((updated_entry, snapshot_path)) => {
                 if updated_entry != entry {
                     dirty_lock = true;
@@ -334,13 +310,12 @@ fn sync(context: &AppContext) -> Result<ExitCode> {
         }
     }
 
-    remove_leftover_links(&root, &lockfile.alias_set())?;
+    let keep = lockfile.aliases().into_iter().collect::<BTreeSet<_>>();
+    remove_leftover_links(&root, &keep)?;
     if dirty_lock {
         lockfile.write(&root.lock_path)?;
     }
-    context
-        .store()
-        .refresh_root(&context.git, &root.lock_path)?;
+    store.refresh_root(&context.git, &root.lock_path)?;
 
     if failed {
         Ok(ExitCode::from(1))
@@ -352,6 +327,7 @@ fn sync(context: &AppContext) -> Result<ExitCode> {
 fn update(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
+    let store = prepared_store(context)?;
     let mut lockfile = root.load_lockfile()?;
     let selected = lockfile.select_aliases(aliases)?;
     let mut failed = false;
@@ -360,7 +336,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
         let Some(entry) = lockfile.get(&alias).cloned() else {
             continue;
         };
-        match realize_entry(context, &entry, true) {
+        match realize_entry(context, &store, &entry, true) {
             Ok((updated_entry, snapshot_path)) => {
                 lockfile.upsert(updated_entry);
                 replace_symlink(&root.grepo_dir.join(&alias), &snapshot_path)?;
@@ -374,9 +350,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
     }
 
     lockfile.write(&root.lock_path)?;
-    context
-        .store()
-        .refresh_root(&context.git, &root.lock_path)?;
+    store.refresh_root(&context.git, &root.lock_path)?;
     if failed {
         Ok(ExitCode::from(1))
     } else {
@@ -385,20 +359,22 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<ExitCode> {
 }
 
 fn gc(context: &AppContext) -> Result<ExitCode> {
-    let report = context.store().gc(&context.git)?;
+    let store = prepared_store(context)?;
+    let report = store.gc(&context.git)?;
     print_gc_report(&report);
     Ok(ExitCode::SUCCESS)
 }
 
 fn realize_entry(
     context: &AppContext,
+    store: &Store,
     entry: &LockEntry,
     refresh_tracking: bool,
 ) -> Result<(LockEntry, PathBuf)> {
     let mut updated = entry.clone();
     if refresh_tracking || updated.commit.is_none() {
         if updated.can_update() {
-            updated.commit = Some(resolve_tracking_commit(context, &updated)?);
+            updated.commit = Some(resolve_tracking_commit(context, store, &updated)?);
         } else if updated.commit.is_none() {
             return Err(err(format!(
                 "alias {} is pinned but has no commit",
@@ -411,15 +387,15 @@ fn realize_entry(
         .commit
         .as_deref()
         .ok_or_else(|| err(format!("alias {} has no commit", updated.alias)))?;
-    let snapshot_path =
-        context
-            .store()
-            .ensure_snapshot_for_commit(&context.git, &updated.url, commit)?;
+    let snapshot_path = store.ensure_snapshot_for_commit(&context.git, &updated.url, commit)?;
     Ok((updated, snapshot_path))
 }
 
-fn resolve_tracking_commit(context: &AppContext, entry: &LockEntry) -> Result<String> {
-    let store = context.store();
+fn resolve_tracking_commit(
+    context: &AppContext,
+    store: &Store,
+    entry: &LockEntry,
+) -> Result<String> {
     let remote_dir = store.ensure_remote_cache(&context.git, &entry.url)?;
     let spec = match (
         &entry.track,
@@ -473,6 +449,12 @@ fn print_gc_report(report: &GcReport) {
 fn required_root(start: &Path) -> Result<ProjectRoot> {
     ProjectRoot::discover(start)
         .ok_or_else(|| err(format!("no grepo root found from {}", start.display())))
+}
+
+fn prepared_store(context: &AppContext) -> Result<Store> {
+    let store = context.store();
+    store.prepare()?;
+    Ok(store)
 }
 
 fn collect_aliases(parts: impl Iterator<Item = OsString>, command: &str) -> Result<Vec<String>> {
