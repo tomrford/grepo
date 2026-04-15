@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::cli::{Cli, Command as CliCommand, RemoveArgs, UpdateArgs};
 use crate::error::{GrepoError, Result};
 use crate::git::{Git, ResolveSpec};
-use crate::manifest::{LockEntry, Lockfile, TrackMode};
+use crate::manifest::{LockEntry, LockMode, Lockfile};
 use crate::mutation_lock::MutationLock;
 use crate::output::RunReport;
 use crate::store::{
@@ -82,8 +82,8 @@ pub enum AppError {
     #[error("alias not found: {alias}")]
     AliasNotFound { alias: String },
 
-    #[error("alias {alias} is pinned but has no commit")]
-    MissingPinnedCommit { alias: String },
+    #[error("alias {alias} is exact but has no commit")]
+    MissingExactCommit { alias: String },
 
     #[error("alias {alias} has no commit")]
     MissingCommit { alias: String },
@@ -253,12 +253,12 @@ fn add(context: &AppContext, args: AddArgs) -> Result<RunReport> {
     let mut lockfile = root.load_lockfile()?;
     let mut entry = LockEntry::new(args.alias.clone(), args.url);
     if let Some(ref_name) = args.ref_name {
-        entry.ref_name = Some(ref_name);
+        entry.mode = LockMode::Ref { ref_name };
     } else if let Some(commit) = args.commit {
         entry.commit = Some(commit);
-        entry.track = TrackMode::Pinned;
+        entry.mode = LockMode::Exact;
     } else {
-        entry.track = TrackMode::DefaultBranch;
+        entry.mode = LockMode::Default;
     }
 
     let (entry, snapshot_path) = realize_entry(context, &store, &entry, false)?;
@@ -389,7 +389,7 @@ fn realize_entry(
         if updated.can_update() {
             updated.commit = Some(resolve_tracking_commit(context, store, &updated)?);
         } else if updated.commit.is_none() {
-            return Err(AppError::MissingPinnedCommit {
+            return Err(AppError::MissingExactCommit {
                 alias: updated.alias.clone(),
             }
             .into());
@@ -412,16 +412,11 @@ fn resolve_tracking_commit(
     entry: &LockEntry,
 ) -> Result<String> {
     let remote_dir = store.ensure_remote_cache(&context.git, &entry.url)?;
-    let spec = match (
-        &entry.track,
-        entry.ref_name.as_deref(),
-        entry.commit.as_deref(),
-    ) {
-        (TrackMode::DefaultBranch, _, _) => ResolveSpec::DefaultBranch,
-        (_, Some(ref_name), _) => ResolveSpec::Ref(ref_name.to_string()),
-        (TrackMode::Pinned, _, Some(commit)) => ResolveSpec::Commit(commit.to_string()),
-        (TrackMode::Pinned, _, None) => {
-            return Err(AppError::MissingPinnedCommit {
+    let spec = match &entry.mode {
+        LockMode::Default => ResolveSpec::DefaultBranch,
+        LockMode::Ref { ref_name } => ResolveSpec::Ref(ref_name.clone()),
+        LockMode::Exact => {
+            return Err(AppError::MissingExactCommit {
                 alias: entry.alias.clone(),
             }
             .into());

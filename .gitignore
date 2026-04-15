@@ -2,9 +2,3 @@ target
 .DS_Store
 .direnv
 out
-examples/~$*.xlsx
-
-
-# Added by cargo
-
-/target

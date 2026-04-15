@@ -14,7 +14,6 @@ pub struct Git {
 pub enum ResolveSpec {
     DefaultBranch,
     Ref(String),
-    Commit(String),
 }
 
 #[derive(Debug, Error)]
@@ -99,10 +98,6 @@ impl Git {
         match spec {
             ResolveSpec::DefaultBranch => self.fetch_default_head(remote_dir),
             ResolveSpec::Ref(ref_name) => self.fetch_ref(remote_dir, &ref_name),
-            ResolveSpec::Commit(commit) => {
-                self.ensure_commit_available(remote_dir, &commit)?;
-                Ok(commit)
-            }
         }
     }
 

@@ -16,9 +16,9 @@ Current behavior:
 
 The lockfile supports three states per alias:
 
-- `track = "default"` follows the remote default branch on `update`.
-- `ref = "..."` follows that named ref on `update`.
-- `commit = "..."` without `track` or `ref` is an exact pin.
+- `mode = "default"` follows the remote default branch on `update`.
+- `mode = "ref"` plus `ref = "..."` follows that named ref on `update`.
+- `mode = "exact"` plus `commit = "..."` is an exact pin.
 
 Storage follows OS conventions:
 
@@ -39,11 +39,12 @@ Example `grepo/.lock`:
 ```toml
 [repos.mint]
 url = "git@github.com:tomrford/mint.git"
-track = "default"
+mode = "default"
 commit = "4e019e37011e778fea85b9dd04d396e9db105ac3"
 
 [repos.polarion]
 url = "git@github.com:tomrford/polarionmcp.git"
+mode = "ref"
 ref = "main"
 commit = "abc123..."
 ```

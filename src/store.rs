@@ -125,10 +125,8 @@ impl Store {
     }
 
     pub fn ensure_remote_cache(&self, git: &Git, url: &str) -> Result<PathBuf, StoreError> {
-        let remote_key = git.hash_string(url)?;
-        let remote_dir = self.remotes_dir().join(format!("{remote_key}.git"));
-        git.ensure_remote_cache(&remote_dir, url)?;
-        Ok(remote_dir)
+        let remote_key = self.remote_key(git, url)?;
+        self.ensure_remote_cache_for_key(git, url, &remote_key)
     }
 
     pub fn ensure_snapshot_for_commit(
@@ -137,14 +135,14 @@ impl Store {
         url: &str,
         commit: &str,
     ) -> Result<PathBuf, StoreError> {
-        let remote_key = git.hash_string(url)?;
-        let snapshot_key = git.hash_string(&format!("{url}\n{commit}"))?;
-        let snapshot_dir = self.snapshots_dir().join(&remote_key).join(&snapshot_key);
+        let remote_key = self.remote_key(git, url)?;
+        let snapshot_key = self.snapshot_key(git, url, commit)?;
+        let snapshot_dir = self.snapshot_dir_for_keys(&remote_key, &snapshot_key);
         if snapshot_dir.exists() {
             return Ok(snapshot_dir);
         }
 
-        let remote_dir = self.ensure_remote_cache(git, url)?;
+        let remote_dir = self.ensure_remote_cache_for_key(git, url, &remote_key)?;
         git.ensure_commit_available(&remote_dir, commit)?;
         git.materialize_snapshot(&remote_dir, commit, &snapshot_dir)?;
         make_read_only(&snapshot_dir)?;
@@ -158,8 +156,7 @@ impl Store {
                 path: lock_path.to_path_buf(),
                 source,
             })?;
-        let root_key = git.hash_string(&canonical.display().to_string())?;
-        let root_link = self.roots_dir().join(format!("{root_key}.lock"));
+        let root_link = self.root_link(git, &canonical)?;
         if root_link.exists() {
             fs::remove_file(&root_link).map_err(|source| StoreError::RemoveFile {
                 path: root_link.clone(),
@@ -206,11 +203,10 @@ impl Store {
                 let Some(commit) = &repo.commit else {
                     continue;
                 };
-                let remote_key = git.hash_string(&repo.url)?;
-                let snapshot_key = git.hash_string(&format!("{}\n{}", repo.url, commit))?;
-                reachable_snapshots
-                    .insert(self.snapshots_dir().join(&remote_key).join(snapshot_key));
-                reachable_remotes.insert(self.remotes_dir().join(format!("{remote_key}.git")));
+                let remote_key = self.remote_key(git, &repo.url)?;
+                let snapshot_key = self.snapshot_key(git, &repo.url, commit)?;
+                reachable_snapshots.insert(self.snapshot_dir_for_keys(&remote_key, &snapshot_key));
+                reachable_remotes.insert(self.remote_dir_for_key(&remote_key));
             }
         }
 
@@ -219,8 +215,10 @@ impl Store {
                 continue;
             }
 
+            let mut has_remaining_entries = false;
             for snapshot_dir in read_dir_paths(&url_dir)? {
                 if !snapshot_dir.is_dir() || reachable_snapshots.contains(&snapshot_dir) {
+                    has_remaining_entries = true;
                     continue;
                 }
                 make_writable(&snapshot_dir)?;
@@ -231,7 +229,7 @@ impl Store {
                 report.removed_snapshots.push(snapshot_dir);
             }
 
-            if read_dir_paths(&url_dir)?.is_empty() {
+            if !has_remaining_entries {
                 fs::remove_dir(&url_dir).map_err(|source| StoreError::RemoveDir {
                     path: url_dir.clone(),
                     source,
@@ -251,6 +249,38 @@ impl Store {
         }
 
         Ok(report)
+    }
+
+    fn remote_key(&self, git: &Git, url: &str) -> Result<String, StoreError> {
+        Ok(git.hash_string(url)?)
+    }
+
+    fn snapshot_key(&self, git: &Git, url: &str, commit: &str) -> Result<String, StoreError> {
+        Ok(git.hash_string(&format!("{url}\n{commit}"))?)
+    }
+
+    fn remote_dir_for_key(&self, remote_key: &str) -> PathBuf {
+        self.remotes_dir().join(format!("{remote_key}.git"))
+    }
+
+    fn snapshot_dir_for_keys(&self, remote_key: &str, snapshot_key: &str) -> PathBuf {
+        self.snapshots_dir().join(remote_key).join(snapshot_key)
+    }
+
+    fn ensure_remote_cache_for_key(
+        &self,
+        git: &Git,
+        url: &str,
+        remote_key: &str,
+    ) -> Result<PathBuf, StoreError> {
+        let remote_dir = self.remote_dir_for_key(remote_key);
+        git.ensure_remote_cache(&remote_dir, url)?;
+        Ok(remote_dir)
+    }
+
+    fn root_link(&self, git: &Git, canonical_lock_path: &Path) -> Result<PathBuf, StoreError> {
+        let root_key = git.hash_string(&canonical_lock_path.display().to_string())?;
+        Ok(self.roots_dir().join(format!("{root_key}.lock")))
     }
 }
 
@@ -304,44 +334,14 @@ pub fn is_managed_symlink_name(name: &str) -> bool {
 }
 
 fn make_read_only(root: &Path) -> Result<(), StoreError> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let metadata = fs::symlink_metadata(&path).map_err(|source| StoreError::Metadata {
-            path: path.clone(),
-            source,
-        })?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            continue;
-        }
-
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(permissions.mode() & !0o222);
-        fs::set_permissions(&path, permissions).map_err(|source| StoreError::SetPermissions {
-            path: path.clone(),
-            source,
-        })?;
-
-        if file_type.is_dir() {
-            for entry in fs::read_dir(&path).map_err(|source| StoreError::ReadDir {
-                path: path.clone(),
-                source,
-            })? {
-                stack.push(
-                    entry
-                        .map_err(|source| StoreError::ReadDirEntry {
-                            path: path.clone(),
-                            source,
-                        })?
-                        .path(),
-                );
-            }
-        }
-    }
-    Ok(())
+    rewrite_tree_modes(root, |mode| mode & !0o222)
 }
 
 fn make_writable(root: &Path) -> Result<(), StoreError> {
+    rewrite_tree_modes(root, |mode| mode | 0o700)
+}
+
+fn rewrite_tree_modes(root: &Path, rewrite: impl Fn(u32) -> u32) -> Result<(), StoreError> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
         let metadata = fs::symlink_metadata(&path).map_err(|source| StoreError::Metadata {
@@ -354,7 +354,7 @@ fn make_writable(root: &Path) -> Result<(), StoreError> {
         }
 
         let mut permissions = metadata.permissions();
-        permissions.set_mode(permissions.mode() | 0o700);
+        permissions.set_mode(rewrite(permissions.mode()));
         fs::set_permissions(&path, permissions).map_err(|source| StoreError::SetPermissions {
             path: path.clone(),
             source,

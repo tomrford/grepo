@@ -59,7 +59,7 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
 
     let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
     assert!(lockfile.contains("[repos.docs]"));
-    assert!(lockfile.contains("track = \"default\""));
+    assert!(lockfile.contains("mode = \"default\""));
     assert!(lockfile.contains("commit = "));
 
     let link = workspace.join("grepo/docs");
@@ -307,6 +307,36 @@ fn add_rejects_leading_dot_aliases() {
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid alias: .lock");
     assert!(!workspace.join("grepo").exists());
+}
+
+#[test]
+fn add_ref_named_default_is_not_ambiguous_in_lockfile() {
+    let root = TestDir::new("named-default-ref");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+    git(Some(&seed), &["checkout", "-b", "default"]);
+    git(Some(&seed), &["push", "-u", "origin", "default"]);
+
+    let report = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["add", "docs", remote.to_str().unwrap(), "--ref", "default"],
+    )
+    .unwrap();
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
+
+    let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    assert!(lockfile.contains("mode = \"ref\""));
+    assert!(lockfile.contains("ref = \"default\""));
+    assert!(!lockfile.contains("mode = \"default\""));
 }
 
 #[test]
