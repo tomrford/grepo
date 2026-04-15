@@ -3,6 +3,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fs4::fs_std::FileExt;
+
 use crate::app::run_for_test;
 
 struct TestDir {
@@ -43,7 +45,7 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
 
     seed_remote_repo(&remote, &seed, "README.md", "hello\n");
 
-    let code = run_for_test(
+    let report = run_for_test(
         workspace.clone(),
         cache_root.clone(),
         state_root.clone(),
@@ -51,7 +53,9 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
         &["add", "docs", remote.to_str().unwrap()],
     )
     .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
+    assert_eq!(report.stdout().len(), 1);
+    assert!(report.stdout()[0].starts_with("added docs -> "));
 
     let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
     assert!(lockfile.contains("[repos.docs]"));
@@ -126,7 +130,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
             .join("b.txt"),
     )
     .unwrap();
-    let code = run_for_test(
+    let report = run_for_test(
         workspace.clone(),
         cache_root.clone(),
         state_root.clone(),
@@ -134,7 +138,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
         &["update", "a"],
     )
     .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
 
     let after_a = fs::read_to_string(
         fs::canonicalize(workspace.join("grepo/a"))
@@ -187,7 +191,7 @@ fn gc_prunes_unreachable_snapshots_and_remotes_from_rooted_lockfiles() {
     let stale_remote = cache_root.join("remotes/stale.git");
     fs::create_dir_all(&stale_remote).unwrap();
 
-    let code = run_for_test(
+    let report = run_for_test(
         root.path.clone(),
         cache_root.clone(),
         state_root.clone(),
@@ -195,7 +199,7 @@ fn gc_prunes_unreachable_snapshots_and_remotes_from_rooted_lockfiles() {
         &["gc"],
     )
     .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
     assert!(rooted_snapshot.exists());
     assert!(remote_cache.exists());
     assert!(!stale_snapshot.exists());
@@ -227,7 +231,7 @@ fn remove_deletes_dangling_managed_symlink() {
     make_tree_writable(&snapshot);
     fs::remove_dir_all(&snapshot).unwrap();
 
-    let code = run_for_test(
+    let report = run_for_test(
         workspace.clone(),
         cache_root.clone(),
         state_root.clone(),
@@ -235,7 +239,8 @@ fn remove_deletes_dangling_managed_symlink() {
         &["remove", "docs"],
     )
     .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
+    assert_eq!(report.stdout(), &["removed docs".to_string()]);
     assert!(!link.exists());
     assert!(
         !fs::symlink_metadata(&link)
@@ -264,7 +269,7 @@ fn sync_prunes_dangling_symlinks_in_tool_owned_dir() {
     let link = workspace.join("grepo/manual");
     symlink(workspace.join("missing"), &link).unwrap();
 
-    let code = run_for_test(
+    let report = run_for_test(
         workspace.clone(),
         cache_root.clone(),
         state_root.clone(),
@@ -272,7 +277,7 @@ fn sync_prunes_dangling_symlinks_in_tool_owned_dir() {
         &["sync"],
     )
     .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
     assert!(
         !fs::symlink_metadata(&link)
             .map(|metadata| metadata.file_type().is_symlink())
@@ -333,8 +338,8 @@ fn remove_reports_missing_alias_cleanly() {
 }
 
 #[test]
-fn sync_recovers_stale_mutation_lock() {
-    let root = TestDir::new("stale-lock");
+fn sync_reports_busy_mutation_lock() {
+    let root = TestDir::new("busy-lock");
     let workspace = root.path.join("workspace");
     let cache_root = root.path.join("cache");
     let state_root = root.path.join("state");
@@ -348,18 +353,31 @@ fn sync_recovers_stale_mutation_lock() {
         &["init"],
     )
     .unwrap();
-    fs::write(workspace.join("grepo/.mutate.lock"), "999999\n").unwrap();
+    let lock_path = workspace.join("grepo/.mutate.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    file.try_lock_exclusive().unwrap();
 
-    let code = run_for_test(
+    let error = run_for_test(
         workspace.clone(),
         cache_root,
         state_root,
         "git".into(),
         &["sync"],
     )
-    .unwrap();
-    assert_eq!(code, std::process::ExitCode::SUCCESS);
-    assert!(!workspace.join("grepo/.mutate.lock").exists());
+    .unwrap_err();
+    assert_eq!(
+        format!("{error}"),
+        format!(
+            "another grepo command is already mutating {}",
+            workspace.join("grepo").display()
+        )
+    );
 }
 
 fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str) {

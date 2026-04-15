@@ -1,73 +1,123 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
-pub type Result<T> = std::result::Result<T, GrepoError>;
+use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub struct GrepoError {
-    message: String,
+pub type UtilResult<T> = std::result::Result<T, UtilError>;
+pub type CommandResult<T> = std::result::Result<T, CommandError>;
+
+#[derive(Debug, Error)]
+pub enum UtilError {
+    #[error("failed to determine current directory: {0}")]
+    CurrentDir(#[source] std::io::Error),
+
+    #[error("failed to determine OS cache directory")]
+    MissingCacheRoot,
+
+    #[error("failed to determine OS state directory")]
+    MissingStateRoot,
+
+    #[error("{path} has no parent directory")]
+    MissingParent { path: PathBuf },
+
+    #[error("failed to create directory {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to write temporary file {path}: {source}")]
+    WriteTempFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to rename {from} to {to}: {source}")]
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
-impl GrepoError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
+#[derive(Debug, Error)]
+pub enum CommandError {
+    #[error("failed to spawn {cmd}: {source}")]
+    Spawn {
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to open stdin for {cmd}")]
+    MissingStdin { cmd: String },
+
+    #[error("failed to write stdin for {cmd}: {source}")]
+    WriteStdin {
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to wait for {cmd}: {source}")]
+    Wait {
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{cmd} failed{detail}")]
+    Failed { cmd: String, detail: String },
 }
 
-impl Display for GrepoError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
+pub fn current_dir() -> UtilResult<PathBuf> {
+    std::env::current_dir().map_err(UtilError::CurrentDir)
 }
 
-impl std::error::Error for GrepoError {}
-
-impl From<std::io::Error> for GrepoError {
-    fn from(error: std::io::Error) -> Self {
-        Self::new(error.to_string())
-    }
-}
-
-pub fn err(message: impl Into<String>) -> GrepoError {
-    GrepoError::new(message)
-}
-
-pub fn current_dir() -> Result<PathBuf> {
-    std::env::current_dir().map_err(Into::into)
-}
-
-pub fn cache_root() -> Result<PathBuf> {
+pub fn cache_root() -> UtilResult<PathBuf> {
     dirs::cache_dir()
         .map(|path| path.join("grepo"))
-        .ok_or_else(|| err("failed to determine OS cache directory"))
+        .ok_or(UtilError::MissingCacheRoot)
 }
 
-pub fn state_root() -> Result<PathBuf> {
+pub fn state_root() -> UtilResult<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|path| path.join("grepo"))
-        .ok_or_else(|| err("failed to determine OS state directory"))
+        .ok_or(UtilError::MissingStateRoot)
 }
 
-pub fn ensure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
+pub fn ensure_dir(path: &Path) -> UtilResult<()> {
+    fs::create_dir_all(path).map_err(|source| UtilError::CreateDir {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(())
 }
 
-pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| err(format!("{} has no parent directory", path.display())))?;
+pub fn write_atomic(path: &Path, contents: &str) -> UtilResult<()> {
+    let parent = path.parent().ok_or_else(|| UtilError::MissingParent {
+        path: path.to_path_buf(),
+    })?;
     ensure_dir(parent)?;
     let temp = unique_path(parent, ".grepo-write");
-    fs::write(&temp, contents)?;
-    fs::rename(temp, path)?;
+    fs::write(&temp, contents).map_err(|source| UtilError::WriteTempFile {
+        path: temp.clone(),
+        source,
+    })?;
+    fs::rename(&temp, path).map_err(|source| UtilError::Rename {
+        from: temp,
+        to: path.to_path_buf(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -80,21 +130,13 @@ pub fn unique_path(parent: &Path, prefix: &str) -> PathBuf {
     parent.join(format!("{prefix}-{pid}-{nanos}"))
 }
 
-fn format_command(program: &OsStr, args: &[OsString]) -> String {
-    let mut rendered = program.to_string_lossy().into_owned();
-    for arg in args {
-        rendered.push(' ');
-        rendered.push_str(&shellish(arg));
-    }
-    rendered
-}
-
 pub fn run_command(
     program: &OsStr,
     args: &[OsString],
     cwd: Option<&Path>,
     stdin_data: Option<&[u8]>,
-) -> Result<CommandOutput> {
+) -> CommandResult<CommandOutput> {
+    let cmd = format_command(program, args);
     let mut command = Command::new(program);
     command.args(args);
     if let Some(dir) = cwd {
@@ -106,28 +148,27 @@ pub fn run_command(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = command.spawn().map_err(|error| {
-        err(format!(
-            "failed to spawn {}: {error}",
-            format_command(program, args)
-        ))
+    let mut child = command.spawn().map_err(|source| CommandError::Spawn {
+        cmd: cmd.clone(),
+        source,
     })?;
 
     if let Some(input) = stdin_data {
-        use std::io::Write;
         let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| err("failed to open stdin for child process"))?;
-        stdin.write_all(input)?;
+            .ok_or_else(|| CommandError::MissingStdin { cmd: cmd.clone() })?;
+        stdin
+            .write_all(input)
+            .map_err(|source| CommandError::WriteStdin {
+                cmd: cmd.clone(),
+                source,
+            })?;
     }
 
-    let output = child.wait_with_output().map_err(|error| {
-        err(format!(
-            "failed to wait for {}: {error}",
-            format_command(program, args)
-        ))
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|source| CommandError::Wait { cmd, source })?;
 
     Ok(CommandOutput {
         status: output.status,
@@ -143,23 +184,37 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
-    pub fn success(self, program: &OsStr, args: &[OsString]) -> Result<Self> {
+    pub fn success(self, program: &OsStr, args: &[OsString]) -> CommandResult<Self> {
         if self.status.success() {
             return Ok(self);
         }
 
+        let cmd = format_command(program, args);
         let stderr = self.stderr.trim();
-        let message = if stderr.is_empty() {
-            format!(
-                "{} exited with status {}",
-                format_command(program, args),
-                self.status
-            )
+        let detail = if stderr.is_empty() {
+            format!(" with status {}", ExitStatusDisplay(self.status))
         } else {
-            format!("{} failed: {}", format_command(program, args), stderr)
+            format!(": {stderr}")
         };
-        Err(err(message))
+        Err(CommandError::Failed { cmd, detail })
     }
+}
+
+struct ExitStatusDisplay(ExitStatus);
+
+impl Display for ExitStatusDisplay {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+fn format_command(program: &OsStr, args: &[OsString]) -> String {
+    let mut rendered = program.to_string_lossy().into_owned();
+    for arg in args {
+        rendered.push(' ');
+        rendered.push_str(&shellish(arg));
+    }
+    rendered
 }
 
 fn shell_escape(value: &str) -> String {

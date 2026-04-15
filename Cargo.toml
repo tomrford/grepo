@@ -6,4 +6,7 @@ description = "Local-first read-only reference repo store for recurring project 
 license = "MIT"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 dirs = "6.0.0"
+fs4 = "0.13.1"
+thiserror = "2.0.18"

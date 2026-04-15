@@ -1,27 +1,29 @@
 # grepo
 
-`grepo` is a small Rust CLI for recurring read-only reference repos.
+`grepo` is a small Rust CLI for keeping recurring reference repositories under a project-local `grepo/` directory.
 
-It owns a `grepo/` directory in your project, keeps a tracked `grepo/.lock`, materializes read-only snapshots in a shared local cache, keeps GC roots in OS-native state storage, and exposes project-local symlinks like `grepo/mint`.
+It keeps `grepo/.lock` as the tracked source of truth, materializes read-only snapshots in a shared local cache, and exposes stable symlinks like `grepo/mint` inside the project.
 
-Current shape:
+Current behavior:
 
-- `grepo/` is the tool-owned root in a project.
-- `grepo/.lock` is the tracked source of truth.
-- `grepo/.gitignore` keeps only `.lock` and `.gitignore` tracked.
-- `grepo/<alias>` are generated symlinks.
-- non-hidden symlinks under `grepo/` are tool-managed and may be replaced or pruned by `sync`.
-- `grepo add` eagerly resolves and syncs the new entry.
-- `grepo sync` realizes locked commits exactly.
-- `grepo update` advances default-branch or named-ref entries and can target specific aliases.
-- `grepo gc` fully prunes unreachable snapshots and remotes based on rooted lockfiles.
+- `grepo/` is tool-owned.
+- `grepo/.lock` is rewritten canonically by the tool.
+- `grepo/<alias>` entries are generated symlinks and may be replaced or pruned by `sync`.
+- `add` resolves and materializes immediately.
+- `sync` realizes the commits already recorded in `grepo/.lock`.
+- `update` advances tracked entries and rewrites `grepo/.lock`.
+- `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles.
 
-Storage follows OS norms:
+The lockfile supports three states per alias:
 
-- macOS cache: `~/Library/Caches/grepo`
-- macOS state: `~/Library/Application Support/grepo`
-- Linux cache: `${XDG_CACHE_HOME:-~/.cache}/grepo`
-- Linux state: `${XDG_STATE_HOME:-~/.local/state}/grepo` when available, otherwise the local data directory
+- `track = "default"` follows the remote default branch on `update`.
+- `ref = "..."` follows that named ref on `update`.
+- `commit = "..."` without `track` or `ref` is an exact pin.
+
+Storage follows OS conventions:
+
+- cache: `~/Library/Caches/grepo` on macOS, `${XDG_CACHE_HOME:-~/.cache}/grepo` on Linux
+- state: `~/Library/Application Support/grepo` on macOS, `${XDG_STATE_HOME:-~/.local/state}/grepo` on Linux when available, otherwise the local data directory
 
 Quick start:
 
@@ -45,16 +47,3 @@ url = "git@github.com:tomrford/polarionmcp.git"
 ref = "main"
 commit = "abc123..."
 ```
-
-Command surface:
-
-```text
-grepo init
-grepo add <alias> <url> [--ref <ref> | --commit <commit>]
-grepo remove <alias>...
-grepo sync
-grepo update [alias...]
-grepo gc
-```
-
-More detail lives in [spec.md](/Users/tomford/code/projects/grepo/spec.md).

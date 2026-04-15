@@ -1,7 +1,10 @@
 mod app;
+mod cli;
+mod error;
 mod git;
 mod manifest;
 mod mutation_lock;
+mod output;
 mod store;
 mod util;
 

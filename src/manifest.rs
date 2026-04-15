@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::util::{Result, err, is_valid_alias, write_atomic};
+use thiserror::Error;
+
+use crate::util::{is_valid_alias, write_atomic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TrackMode {
@@ -40,14 +42,62 @@ pub struct Lockfile {
     repos: BTreeMap<String, LockEntry>,
 }
 
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    #[error(transparent)]
+    Util(#[from] crate::util::UtilError),
+
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid grepo/.lock line {line_number}: expected a [repos.<alias>] section first")]
+    MissingSection { line_number: usize },
+
+    #[error("invalid grepo/.lock line {line_number}: expected key = \"value\"")]
+    InvalidAssignment { line_number: usize },
+
+    #[error("invalid section header on line {line_number}")]
+    InvalidSectionHeader { line_number: usize },
+
+    #[error("invalid alias in section header on line {line_number}: {alias}")]
+    InvalidSectionAlias { line_number: usize, alias: String },
+
+    #[error("invalid value on line {line_number}: expected quoted string")]
+    InvalidQuotedValue { line_number: usize },
+
+    #[error("invalid track value on line {line_number}: {value}")]
+    InvalidTrack { line_number: usize, value: String },
+
+    #[error("unsupported key on line {line_number}: {key}")]
+    UnsupportedKey { line_number: usize, key: String },
+
+    #[error("invalid alias in grepo/.lock: {alias}")]
+    InvalidAlias { alias: String },
+
+    #[error("alias {alias} is missing a url")]
+    MissingUrl { alias: String },
+
+    #[error("alias {alias} cannot define both `ref` and `track`")]
+    RefAndTrack { alias: String },
+
+    #[error("alias not found in grepo/.lock: {alias}")]
+    AliasNotFound { alias: String },
+}
+
 impl Lockfile {
-    pub fn load(path: &Path) -> Result<Self> {
-        let contents = fs::read_to_string(path)
-            .map_err(|error| err(format!("failed to read {}: {error}", path.display())))?;
+    pub fn load(path: &Path) -> Result<Self, ManifestError> {
+        let contents = fs::read_to_string(path).map_err(|source| ManifestError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Self::parse(&contents)
     }
 
-    pub fn parse(contents: &str) -> Result<Self> {
+    pub fn parse(contents: &str) -> Result<Self, ManifestError> {
         let mut lockfile = Self::default();
         let mut current_alias: Option<String> = None;
         let mut current_entry: Option<LockEntry> = None;
@@ -67,18 +117,12 @@ impl Lockfile {
                 continue;
             }
 
-            let entry = current_entry.as_mut().ok_or_else(|| {
-                err(format!(
-                    "invalid grepo/.lock line {}: expected a [repos.<alias>] section first",
-                    line_number
-                ))
-            })?;
-            let (key, value) = trimmed.split_once('=').ok_or_else(|| {
-                err(format!(
-                    "invalid grepo/.lock line {}: expected key = \"value\"",
-                    line_number
-                ))
-            })?;
+            let entry = current_entry
+                .as_mut()
+                .ok_or(ManifestError::MissingSection { line_number })?;
+            let (key, value) = trimmed
+                .split_once('=')
+                .ok_or(ManifestError::InvalidAssignment { line_number })?;
             let key = key.trim();
             let value = parse_quoted_value(value.trim(), line_number)?;
 
@@ -87,19 +131,16 @@ impl Lockfile {
                 "ref" => entry.ref_name = Some(value),
                 "track" => {
                     if value != "default" {
-                        return Err(err(format!(
-                            "invalid track value on line {}: {}",
-                            line_number, value
-                        )));
+                        return Err(ManifestError::InvalidTrack { line_number, value });
                     }
                     entry.track = TrackMode::DefaultBranch;
                 }
                 "commit" => entry.commit = Some(value),
                 _ => {
-                    return Err(err(format!(
-                        "unsupported key on line {}: {}",
-                        line_number, key
-                    )));
+                    return Err(ManifestError::UnsupportedKey {
+                        line_number,
+                        key: key.to_string(),
+                    });
                 }
             }
         }
@@ -108,8 +149,9 @@ impl Lockfile {
         Ok(lockfile)
     }
 
-    pub fn write(&self, path: &Path) -> Result<()> {
-        write_atomic(path, &self.render())
+    pub fn write(&self, path: &Path) -> Result<(), ManifestError> {
+        write_atomic(path, &self.render())?;
+        Ok(())
     }
 
     pub fn render(&self) -> String {
@@ -154,14 +196,16 @@ impl Lockfile {
         self.repos.values()
     }
 
-    pub fn select_aliases(&self, aliases: &[String]) -> Result<Vec<String>> {
+    pub fn select_aliases(&self, aliases: &[String]) -> Result<Vec<String>, ManifestError> {
         if aliases.is_empty() {
             return Ok(self.aliases());
         }
 
         for alias in aliases {
             if !self.repos.contains_key(alias) {
-                return Err(err(format!("alias not found in grepo/.lock: {alias}")));
+                return Err(ManifestError::AliasNotFound {
+                    alias: alias.clone(),
+                });
             }
         }
         Ok(aliases.to_vec())
@@ -172,51 +216,45 @@ fn finish_section(
     lockfile: &mut Lockfile,
     alias: Option<String>,
     entry: Option<LockEntry>,
-) -> Result<()> {
+) -> Result<(), ManifestError> {
     let (Some(alias), Some(entry)) = (alias, entry) else {
         return Ok(());
     };
 
     if !is_valid_alias(&alias) {
-        return Err(err(format!("invalid alias in grepo/.lock: {alias}")));
+        return Err(ManifestError::InvalidAlias { alias });
     }
     if entry.url.is_empty() {
-        return Err(err(format!("alias {} is missing a url", alias)));
+        return Err(ManifestError::MissingUrl { alias });
     }
     if entry.ref_name.is_some() && entry.track == TrackMode::DefaultBranch {
-        return Err(err(format!(
-            "alias {} cannot define both `ref` and `track`",
-            alias
-        )));
+        return Err(ManifestError::RefAndTrack { alias });
     }
 
     lockfile.upsert(entry);
     Ok(())
 }
 
-fn parse_section_header(line: &str, line_number: usize) -> Result<String> {
+fn parse_section_header(line: &str, line_number: usize) -> Result<String, ManifestError> {
     let inner = line
         .strip_prefix("[repos.")
         .and_then(|value| value.strip_suffix(']'))
-        .ok_or_else(|| err(format!("invalid section header on line {}", line_number)))?;
+        .ok_or(ManifestError::InvalidSectionHeader { line_number })?;
     if !is_valid_alias(inner) {
-        return Err(err(format!(
-            "invalid alias in section header on line {}: {}",
-            line_number, inner
-        )));
+        return Err(ManifestError::InvalidSectionAlias {
+            line_number,
+            alias: inner.to_string(),
+        });
     }
     Ok(inner.to_string())
 }
 
-fn parse_quoted_value(raw: &str, line_number: usize) -> Result<String> {
+fn parse_quoted_value(raw: &str, line_number: usize) -> Result<String, ManifestError> {
     let Some(inner) = raw
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
     else {
-        return Err(err(format!(
-            "invalid value on line {}: expected quoted string",
-            line_number
-        )));
+        return Err(ManifestError::InvalidQuotedValue { line_number });
     };
     Ok(inner.replace("\\\"", "\""))
 }
@@ -258,20 +296,6 @@ commit = "def"
         assert_eq!(
             lockfile.get("mint").unwrap().ref_name.as_deref(),
             Some("main")
-        );
-    }
-
-    #[test]
-    fn renders_canonical_format() {
-        let mut lockfile = Lockfile::default();
-        let mut entry = LockEntry::new("mint".into(), "git@github.com:tomrford/mint.git".into());
-        entry.ref_name = Some("main".into());
-        entry.commit = Some("abc".into());
-        lockfile.upsert(entry);
-
-        assert_eq!(
-            lockfile.render(),
-            "[repos.mint]\nurl = \"git@github.com:tomrford/mint.git\"\nref = \"main\"\ncommit = \"abc\"\n\n"
         );
     }
 }

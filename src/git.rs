@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::util::{Result, ensure_dir, err, run_command};
+use thiserror::Error;
+
+use crate::util::{CommandError, ensure_dir, run_command};
 
 #[derive(Clone, Debug)]
 pub struct Git {
@@ -15,6 +17,36 @@ pub enum ResolveSpec {
     Commit(String),
 }
 
+#[derive(Debug, Error)]
+pub enum GitError {
+    #[error(transparent)]
+    Command(#[from] CommandError),
+
+    #[error(transparent)]
+    Util(#[from] crate::util::UtilError),
+
+    #[error("remote cache path has no parent: {path}")]
+    MissingRemoteParent { path: PathBuf },
+
+    #[error("snapshot path has no parent: {path}")]
+    MissingSnapshotParent { path: PathBuf },
+
+    #[error("failed to strip .git from {path}: {source}")]
+    StripGit {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to move snapshot into place {from} -> {to}: {source}")]
+    MoveSnapshot {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 impl Git {
     pub fn new(program: impl Into<OsString>) -> Self {
         Self {
@@ -22,24 +54,23 @@ impl Git {
         }
     }
 
-    pub fn hash_string(&self, value: &str) -> Result<String> {
+    pub fn hash_string(&self, value: &str) -> Result<String, GitError> {
         let args = vec![OsString::from("hash-object"), OsString::from("--stdin")];
         let output = run_command(self.program(), &args, None, Some(value.as_bytes()))?
             .success(self.program(), &args)?;
         Ok(output.stdout.trim().to_string())
     }
 
-    pub fn ensure_remote_cache(&self, remote_dir: &Path, url: &str) -> Result<()> {
+    pub fn ensure_remote_cache(&self, remote_dir: &Path, url: &str) -> Result<(), GitError> {
         if remote_dir.exists() {
             return Ok(());
         }
 
-        let parent = remote_dir.parent().ok_or_else(|| {
-            err(format!(
-                "remote cache path has no parent: {}",
-                remote_dir.display()
-            ))
-        })?;
+        let parent = remote_dir
+            .parent()
+            .ok_or_else(|| GitError::MissingRemoteParent {
+                path: remote_dir.to_path_buf(),
+            })?;
         ensure_dir(parent)?;
 
         let init_args = self.base_args([
@@ -64,7 +95,7 @@ impl Git {
         Ok(())
     }
 
-    pub fn resolve_spec(&self, remote_dir: &Path, spec: ResolveSpec) -> Result<String> {
+    pub fn resolve_spec(&self, remote_dir: &Path, spec: ResolveSpec) -> Result<String, GitError> {
         match spec {
             ResolveSpec::DefaultBranch => self.fetch_default_head(remote_dir),
             ResolveSpec::Ref(ref_name) => self.fetch_ref(remote_dir, &ref_name),
@@ -75,7 +106,7 @@ impl Git {
         }
     }
 
-    pub fn ensure_commit_available(&self, remote_dir: &Path, commit: &str) -> Result<()> {
+    pub fn ensure_commit_available(&self, remote_dir: &Path, commit: &str) -> Result<(), GitError> {
         if self.has_commit(remote_dir, commit)? {
             return Ok(());
         }
@@ -99,13 +130,12 @@ impl Git {
         remote_dir: &Path,
         commit: &str,
         target_dir: &Path,
-    ) -> Result<()> {
-        let parent = target_dir.parent().ok_or_else(|| {
-            err(format!(
-                "snapshot path has no parent: {}",
-                target_dir.display()
-            ))
-        })?;
+    ) -> Result<(), GitError> {
+        let parent = target_dir
+            .parent()
+            .ok_or_else(|| GitError::MissingSnapshotParent {
+                path: target_dir.to_path_buf(),
+            })?;
         ensure_dir(parent)?;
         let temp_checkout = crate::util::unique_path(parent, ".grepo-checkout");
 
@@ -132,23 +162,19 @@ impl Git {
             .success(self.program(), &checkout_args)
         {
             let _ = std::fs::remove_dir_all(&temp_checkout);
-            return Err(error);
+            return Err(error.into());
         }
 
-        std::fs::remove_dir_all(temp_checkout.join(".git")).map_err(|error| {
-            err(format!(
-                "failed to strip .git from {}: {error}",
-                temp_checkout.display()
-            ))
+        let git_dir = temp_checkout.join(".git");
+        std::fs::remove_dir_all(&git_dir).map_err(|source| GitError::StripGit {
+            path: temp_checkout.clone(),
+            source,
         })?;
 
-        std::fs::rename(&temp_checkout, target_dir).map_err(|error| {
-            let _ = std::fs::remove_dir_all(&temp_checkout);
-            err(format!(
-                "failed to move snapshot into place {} -> {}: {error}",
-                temp_checkout.display(),
-                target_dir.display()
-            ))
+        std::fs::rename(&temp_checkout, target_dir).map_err(|source| GitError::MoveSnapshot {
+            from: temp_checkout.clone(),
+            to: target_dir.to_path_buf(),
+            source,
         })?;
 
         Ok(())
@@ -158,7 +184,7 @@ impl Git {
         &self.program
     }
 
-    fn fetch_default_head(&self, remote_dir: &Path) -> Result<String> {
+    fn fetch_default_head(&self, remote_dir: &Path) -> Result<String, GitError> {
         let fetch_args = self.git_dir_args(
             remote_dir,
             [
@@ -184,7 +210,7 @@ impl Git {
         Ok(output.stdout.trim().to_string())
     }
 
-    fn fetch_ref(&self, remote_dir: &Path, ref_name: &str) -> Result<String> {
+    fn fetch_ref(&self, remote_dir: &Path, ref_name: &str) -> Result<String, GitError> {
         let fetch_args = self.git_dir_args(
             remote_dir,
             [
@@ -206,7 +232,7 @@ impl Git {
         Ok(output.stdout.trim().to_string())
     }
 
-    fn has_commit(&self, remote_dir: &Path, commit: &str) -> Result<bool> {
+    fn has_commit(&self, remote_dir: &Path, commit: &str) -> Result<bool, GitError> {
         let probe = format!("{commit}^{{commit}}");
         let args = self.git_dir_args(
             remote_dir,
