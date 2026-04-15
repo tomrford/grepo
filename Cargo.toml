@@ -2,7 +2,8 @@
 name = "grepo"
 version = "0.0.1"
 edition = "2024"
-description = "Placeholder crate to reserve the grepo name."
+description = "Local-first read-only reference repo store for recurring project dependencies."
 license = "MIT"
 
 [dependencies]
+dirs = "6.0.0"
