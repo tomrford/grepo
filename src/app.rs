@@ -98,7 +98,7 @@ impl ProjectRoot {
         if !lock_path.exists() {
             write_atomic(&lock_path, "")?;
         }
-        write_atomic(&grepo_dir.join(".gitignore"), "*\n!.gitignore\n!.lock\n")?;
+        write_atomic(&grepo_dir.join(".gitignore"), "*\n!.lock\n")?;
 
         Ok(Self {
             grepo_dir,
