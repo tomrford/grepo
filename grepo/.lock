@@ -1,0 +1,4 @@
+[repos.mint]
+url = "git@github.com:fordtom/mint.git"
+mode = "default"
+commit = "d4939bdde1a64f88d1ca2609e7c033fd3fee91b9"
