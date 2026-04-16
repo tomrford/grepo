@@ -65,7 +65,6 @@ jobs:
             }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
 
     env:
       BUILD_CMD: cargo
@@ -105,21 +104,11 @@ jobs:
       - name: Build archive
         shell: bash
         run: |
-          EXE_SUFFIX=""
-          case ${{ matrix.job.target }} in
-            *-pc-windows-*) EXE_SUFFIX=".exe" ;;
-          esac
-
-          BIN_NAME="${PROJECT_NAME}${EXE_SUFFIX}"
+          BIN_NAME="${PROJECT_NAME}"
           BIN_PATH="target/${{ matrix.job.target }}/release/${BIN_NAME}"
 
-          PKG_SUFFIX=".tar.gz"
-          case ${{ matrix.job.target }} in
-            *-pc-windows-*) PKG_SUFFIX=".zip" ;;
-          esac
-
           PKG_BASENAME="${PROJECT_NAME}-v${PROJECT_VERSION}-${{ matrix.job.target }}"
-          PKG_NAME="${PKG_BASENAME}${PKG_SUFFIX}"
+          PKG_NAME="${PKG_BASENAME}.tar.gz"
 
           PKG_STAGING="${CICD_INTERMEDIATES_DIR}/package"
           ARCHIVE_DIR="${PKG_STAGING}/${PKG_BASENAME}/"
@@ -129,16 +118,8 @@ jobs:
           cp README.md LICENSE* "${ARCHIVE_DIR}" 2>/dev/null || true
 
           pushd "${PKG_STAGING}/" >/dev/null
-          case ${{ matrix.job.target }} in
-            *-pc-windows-*)
-              7z a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2
-              certutil -hashfile "${PKG_NAME}" SHA256 > "${PKG_NAME}.sha256"
-              ;;
-            *)
-              tar czf "${PKG_NAME}" "${PKG_BASENAME}"/*
-              shasum -a 256 "${PKG_NAME}" > "${PKG_NAME}.sha256"
-              ;;
-          esac
+          tar czf "${PKG_NAME}" "${PKG_BASENAME}"/*
+          shasum -a 256 "${PKG_NAME}" > "${PKG_NAME}.sha256"
           popd >/dev/null
 
           echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_ENV
