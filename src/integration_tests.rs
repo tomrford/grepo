@@ -109,6 +109,25 @@ fn init_reports_existing_root_on_second_run() {
 }
 
 #[test]
+fn skill_prints_embedded_skill_markdown() {
+    let root = TestDir::new("skill");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let report = run_for_test(workspace, cache_root, state_root, "git".into(), &["skill"]).unwrap();
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
+    assert_eq!(
+        report.stdout(),
+        &[include_str!("../skill/grepo/SKILL.md")
+            .trim_end()
+            .to_string()]
+    );
+    assert!(report.stderr().is_empty());
+}
+
+#[test]
 fn add_does_not_write_lockfile_when_alias_path_collides() {
     let root = TestDir::new("add-collision");
     let workspace = root.path.join("workspace");

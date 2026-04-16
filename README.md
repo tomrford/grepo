@@ -16,6 +16,7 @@ Current behavior:
 - `sync` realizes the commits already recorded in `grepo/.lock`.
 - `update` advances tracked entries and rewrites `grepo/.lock`.
 - `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles; `--verbose` includes per-path detail.
+- `skill` prints the bundled grepo skill markdown for agents that need the exact operating rules.
 
 The lockfile supports three states per alias:
 
@@ -38,6 +39,10 @@ grepo add polarion git@github.com:tomrford/polarionmcp.git --ref main
 grepo list
 grepo update
 ```
+
+Agent integration:
+
+`grepo skill` prints the shipped [`skill/grepo/SKILL.md`](skill/grepo/SKILL.md) text to stdout so an agent can load the exact guidance without guessing the path.
 
 Example `grepo/.lock`:
 

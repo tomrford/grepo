@@ -28,6 +28,8 @@ pub enum Command {
     Update(UpdateArgs),
     /// Delete cached snapshots, remote caches, and root links that no project still references.
     Gc(GcArgs),
+    /// Print the bundled grepo agent skill markdown to stdout.
+    Skill,
 }
 
 #[derive(Debug, Clone, Args)]

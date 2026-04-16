@@ -1,9 +1,13 @@
 [package]
 name = "grepo"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 description = "Local-first read-only reference repo store for recurring project dependencies."
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/tomrford/grepo"
+homepage = "https://github.com/tomrford/grepo"
+documentation = "https://docs.rs/grepo"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

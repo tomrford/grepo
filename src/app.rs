@@ -127,6 +127,7 @@ enum Command {
     Sync,
     Update { aliases: Vec<String> },
     Gc { verbose: bool },
+    Skill,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +167,7 @@ impl TryFrom<CliCommand> for Command {
                 aliases: validate_aliases(aliases)?,
             }),
             CliCommand::Gc(GcArgs { verbose }) => Ok(Self::Gc { verbose }),
+            CliCommand::Skill => Ok(Self::Skill),
         }
     }
 }
@@ -180,8 +182,17 @@ impl Command {
             Self::Sync => sync(context),
             Self::Update { aliases } => update(context, &aliases),
             Self::Gc { verbose } => gc(context, verbose),
+            Self::Skill => skill(),
         }
     }
+}
+
+const SKILL_MD: &str = include_str!("../skill/grepo/SKILL.md");
+
+fn skill() -> Result<RunReport> {
+    let mut report = RunReport::success();
+    report.stdout_line(SKILL_MD.trim_end());
+    Ok(report)
 }
 
 fn init(context: &AppContext) -> Result<RunReport> {
