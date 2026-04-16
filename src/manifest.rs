@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+use crate::error::{GrepoError, Result};
 use crate::util::{is_valid_alias, write_atomic};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -46,37 +46,6 @@ pub struct Lockfile {
     repos: BTreeMap<String, LockEntry>,
 }
 
-#[derive(Debug, Error)]
-pub enum ManifestError {
-    #[error(transparent)]
-    Util(#[from] crate::util::UtilError),
-
-    #[error("failed to read {path}: {source}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("invalid grepo/.lock TOML: {source}")]
-    Parse {
-        #[from]
-        source: toml::de::Error,
-    },
-
-    #[error("failed to serialize grepo/.lock: {source}")]
-    Serialize {
-        #[from]
-        source: toml::ser::Error,
-    },
-
-    #[error("invalid alias in grepo/.lock: {alias}")]
-    InvalidAlias { alias: String },
-
-    #[error("alias not found in grepo/.lock: {alias}")]
-    AliasNotFound { alias: String },
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 struct StoredLockfile {
     #[serde(default)]
@@ -93,21 +62,19 @@ struct StoredLockEntry {
 }
 
 impl Lockfile {
-    pub fn load(path: &Path) -> Result<Self, ManifestError> {
-        let contents = fs::read_to_string(path).map_err(|source| ManifestError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = fs::read_to_string(path)
+            .map_err(|e| GrepoError::Io(format!("failed to read {}: {e}", path.display())))?;
         Self::parse(&contents)
     }
 
-    pub fn parse(contents: &str) -> Result<Self, ManifestError> {
+    pub fn parse(contents: &str) -> Result<Self> {
         let stored: StoredLockfile = toml::from_str(contents)?;
         let mut repos = BTreeMap::new();
 
         for (alias, entry) in stored.repos {
             if !is_valid_alias(&alias) {
-                return Err(ManifestError::InvalidAlias { alias });
+                return Err(GrepoError::InvalidLockAlias(alias));
             }
 
             repos.insert(
@@ -124,12 +91,11 @@ impl Lockfile {
         Ok(Self { repos })
     }
 
-    pub fn write(&self, path: &Path) -> Result<(), ManifestError> {
-        write_atomic(path, &self.render()?)?;
-        Ok(())
+    pub fn write(&self, path: &Path) -> Result<()> {
+        write_atomic(path, &self.render()?)
     }
 
-    pub fn render(&self) -> Result<String, ManifestError> {
+    pub fn render(&self) -> Result<String> {
         let stored = StoredLockfile {
             repos: self
                 .repos
@@ -169,16 +135,14 @@ impl Lockfile {
         self.repos.values()
     }
 
-    pub fn select_aliases(&self, aliases: &[String]) -> Result<Vec<String>, ManifestError> {
+    pub fn select_aliases(&self, aliases: &[String]) -> Result<Vec<String>> {
         if aliases.is_empty() {
             return Ok(self.aliases());
         }
 
         for alias in aliases {
             if !self.repos.contains_key(alias) {
-                return Err(ManifestError::AliasNotFound {
-                    alias: alias.clone(),
-                });
+                return Err(GrepoError::AliasNotFound(alias.clone()));
             }
         }
         Ok(aliases.to_vec())
@@ -287,5 +251,18 @@ commit = "abc"
         .unwrap_err();
 
         assert!(format!("{error}").contains("invalid grepo/.lock TOML"));
+    }
+
+    #[test]
+    fn rejects_invalid_aliases_in_lockfile_with_manifest_context() {
+        let error = Lockfile::parse(
+            r#"[repos.".bad"]
+url = "git@github.com:tomrford/grepo.git"
+mode = "default"
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "invalid alias in grepo/.lock: .bad");
     }
 }

@@ -1,11 +1,9 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use thiserror::Error;
 
 use crate::cli::{Cli, Command as CliCommand, RemoveArgs, UpdateArgs};
 use crate::error::{GrepoError, Result};
@@ -14,7 +12,8 @@ use crate::manifest::{LockEntry, LockMode, Lockfile};
 use crate::mutation_lock::MutationLock;
 use crate::output::RunReport;
 use crate::store::{
-    GcReport, Store, is_managed_symlink_name, remove_managed_symlink, replace_symlink,
+    GcReport, Store, is_managed_symlink_name, read_dir_paths, remove_managed_symlink,
+    replace_symlink, symlink_metadata_if_exists,
 };
 use crate::util::{cache_root, current_dir, ensure_dir, is_valid_alias, state_root, write_atomic};
 
@@ -51,63 +50,6 @@ fn run_env(args: Vec<OsString>) -> Result<RunReport> {
         git: Git::new("git"),
     };
     command.run(&context)
-}
-
-#[derive(Debug, Error)]
-pub enum AppError {
-    #[error(transparent)]
-    Git(#[from] crate::git::GitError),
-
-    #[error(transparent)]
-    Manifest(#[from] crate::manifest::ManifestError),
-
-    #[error(transparent)]
-    MutationLock(#[from] crate::mutation_lock::MutationLockError),
-
-    #[error(transparent)]
-    Store(#[from] crate::store::StoreError),
-
-    #[error(transparent)]
-    Util(#[from] crate::util::UtilError),
-
-    #[error("invalid alias: {alias}")]
-    InvalidAlias { alias: String },
-
-    #[error("cannot initialize grepo root because {path} is not a directory")]
-    RootPathNotDirectory { path: PathBuf },
-
-    #[error("no grepo root found from {start}")]
-    NoProjectRoot { start: PathBuf },
-
-    #[error("alias not found: {alias}")]
-    AliasNotFound { alias: String },
-
-    #[error("alias {alias} is exact but has no commit")]
-    MissingExactCommit { alias: String },
-
-    #[error("alias {alias} has no commit")]
-    MissingCommit { alias: String },
-
-    #[error("failed to read directory {path}: {source}")]
-    ReadDir {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("failed to read directory entry under {path}: {source}")]
-    ReadDirEntry {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("failed to inspect {path}: {source}")]
-    Metadata {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -148,7 +90,7 @@ impl ProjectRoot {
     fn create_at(project_dir: &Path) -> Result<Self> {
         let grepo_dir = project_dir.join("grepo");
         if grepo_dir.exists() && !grepo_dir.is_dir() {
-            return Err(AppError::RootPathNotDirectory { path: grepo_dir }.into());
+            return Err(GrepoError::RootPathNotDirectory(grepo_dir));
         }
         ensure_dir(&grepo_dir)?;
 
@@ -168,11 +110,11 @@ impl ProjectRoot {
         if !self.lock_path.exists() {
             return Ok(Lockfile::default());
         }
-        Ok(Lockfile::load(&self.lock_path)?)
+        Lockfile::load(&self.lock_path)
     }
 
     fn lock_mutation(&self) -> Result<MutationLock> {
-        Ok(MutationLock::acquire(&self.grepo_dir)?)
+        MutationLock::acquire(&self.grepo_dir)
     }
 }
 
@@ -195,9 +137,9 @@ struct AddArgs {
 }
 
 impl TryFrom<CliCommand> for Command {
-    type Error = AppError;
+    type Error = GrepoError;
 
-    fn try_from(value: CliCommand) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: CliCommand) -> Result<Self> {
         match value {
             CliCommand::Init => Ok(Self::Init),
             CliCommand::Add(args) => Ok(Self::Add(AddArgs {
@@ -284,10 +226,7 @@ fn remove(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
 
     for alias in aliases {
         if !lockfile.remove(alias) {
-            return Err(AppError::AliasNotFound {
-                alias: alias.clone(),
-            }
-            .into());
+            return Err(GrepoError::AliasNotFound(alias.clone()));
         }
     }
 
@@ -327,7 +266,7 @@ fn sync(context: &AppContext) -> Result<RunReport> {
                 replace_symlink(&root.grepo_dir.join(&alias), &snapshot_path)?;
                 report.stdout_line(format!("synced {} -> {}", alias, snapshot_path.display()));
             }
-            Err(error) => report.warn_line(format!("failed to sync {}: {error}", alias)),
+            Err(error) => report.warn_line(format!("failed to sync {alias}: {error}")),
         }
     }
 
@@ -358,7 +297,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
                 replace_symlink(&root.grepo_dir.join(&alias), &snapshot_path)?;
                 report.stdout_line(format!("updated {} -> {}", alias, snapshot_path.display()));
             }
-            Err(error) => report.warn_line(format!("failed to update {}: {error}", alias)),
+            Err(error) => report.warn_line(format!("failed to update {alias}: {error}")),
         }
     }
 
@@ -389,19 +328,14 @@ fn realize_entry(
         if updated.can_update() {
             updated.commit = Some(resolve_tracking_commit(context, store, &updated)?);
         } else if updated.commit.is_none() {
-            return Err(AppError::MissingExactCommit {
-                alias: updated.alias.clone(),
-            }
-            .into());
+            return Err(GrepoError::MissingCommit(updated.alias.clone()));
         }
     }
 
     let commit = updated
         .commit
         .as_deref()
-        .ok_or_else(|| AppError::MissingCommit {
-            alias: updated.alias.clone(),
-        })?;
+        .ok_or_else(|| GrepoError::MissingCommit(updated.alias.clone()))?;
     let snapshot_path = store.ensure_snapshot_for_commit(&context.git, &updated.url, commit)?;
     Ok((updated, snapshot_path))
 }
@@ -415,14 +349,9 @@ fn resolve_tracking_commit(
     let spec = match &entry.mode {
         LockMode::Default => ResolveSpec::DefaultBranch,
         LockMode::Ref { ref_name } => ResolveSpec::Ref(ref_name.clone()),
-        LockMode::Exact => {
-            return Err(AppError::MissingExactCommit {
-                alias: entry.alias.clone(),
-            }
-            .into());
-        }
+        LockMode::Exact => return Err(GrepoError::MissingCommit(entry.alias.clone())),
     };
-    Ok(context.git.resolve_spec(&remote_dir, spec)?)
+    context.git.resolve_spec(&remote_dir, spec)
 }
 
 fn prune_leftover_links(
@@ -430,15 +359,7 @@ fn prune_leftover_links(
     keep: &BTreeSet<String>,
     report: &mut RunReport,
 ) -> Result<()> {
-    for entry in fs::read_dir(&root.grepo_dir).map_err(|source| AppError::ReadDir {
-        path: root.grepo_dir.clone(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| AppError::ReadDirEntry {
-            path: root.grepo_dir.clone(),
-            source,
-        })?;
-        let path = entry.path();
+    for path in read_dir_paths(&root.grepo_dir)? {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -446,13 +367,8 @@ fn prune_leftover_links(
             continue;
         }
 
-        if fs::symlink_metadata(&path)
-            .map_err(|source| AppError::Metadata {
-                path: path.clone(),
-                source,
-            })?
-            .file_type()
-            .is_symlink()
+        if symlink_metadata_if_exists(&path)?
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
         {
             remove_managed_symlink(&path)?;
             report.stdout_line(format!("removed {}", path.display()));
@@ -474,12 +390,7 @@ fn append_gc_report(report: &mut RunReport, gc_report: &GcReport) {
 }
 
 fn required_root(start: &Path) -> Result<ProjectRoot> {
-    ProjectRoot::discover(start).ok_or_else(|| {
-        AppError::NoProjectRoot {
-            start: start.to_path_buf(),
-        }
-        .into()
-    })
+    ProjectRoot::discover(start).ok_or_else(|| GrepoError::NoProjectRoot(start.to_path_buf()))
 }
 
 fn prepared_store(context: &AppContext) -> Result<Store> {
@@ -488,15 +399,15 @@ fn prepared_store(context: &AppContext) -> Result<Store> {
     Ok(store)
 }
 
-fn validate_alias(alias: String) -> std::result::Result<String, AppError> {
+fn validate_alias(alias: String) -> Result<String> {
     if is_valid_alias(&alias) {
         Ok(alias)
     } else {
-        Err(AppError::InvalidAlias { alias })
+        Err(GrepoError::InvalidAlias(alias))
     }
 }
 
-fn validate_aliases(aliases: Vec<String>) -> std::result::Result<Vec<String>, AppError> {
+fn validate_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
     aliases.into_iter().map(validate_alias).collect()
 }
 
