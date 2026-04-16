@@ -36,6 +36,9 @@ pub enum GrepoError {
     #[error("alias not found: {0}")]
     AliasNotFound(String),
 
+    #[error("alias already exists: {0} (use --force to replace)")]
+    AliasExists(String),
+
     #[error("alias {0} has no commit")]
     MissingCommit(String),
 

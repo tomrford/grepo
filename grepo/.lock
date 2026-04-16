@@ -1,10 +1,10 @@
 [repos.mint]
 url = "git@github.com:tomrford/mint.git"
+mode = "ref"
 ref = "main"
 commit = "d4939bdde1a64f88d1ca2609e7c033fd3fee91b9"
 
 [repos.self]
 url = "git@github.com:tomrford/grepo.git"
-track = "default"
+mode = "default"
 commit = "b797864a2bea44730ca45f3db2c25af183650516"
-

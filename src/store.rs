@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{GrepoError, Result};
 use crate::git::Git;
 use crate::manifest::Lockfile;
+use crate::mutation_lock::FileLock;
 use crate::util::{ensure_dir, is_valid_alias};
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,7 @@ pub struct GcReport {
     pub removed_snapshots: Vec<PathBuf>,
     pub removed_remotes: Vec<PathBuf>,
     pub removed_roots: Vec<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 impl Store {
@@ -41,16 +43,26 @@ impl Store {
         self.state_root.join("roots")
     }
 
+    fn locks_dir(&self) -> PathBuf {
+        self.state_root.join("locks")
+    }
+
     pub(crate) fn prepare(&self) -> Result<()> {
         ensure_dir(&self.snapshots_dir())?;
         ensure_dir(&self.remotes_dir())?;
         ensure_dir(&self.roots_dir())?;
+        ensure_dir(&self.locks_dir())?;
         Ok(())
     }
 
-    pub fn ensure_remote_cache(&self, git: &Git, url: &str) -> Result<PathBuf> {
+    pub fn with_remote_cache<T>(
+        &self,
+        git: &Git,
+        url: &str,
+        f: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
         let remote_key = self.remote_key(git, url)?;
-        self.ensure_remote_cache_for_key(git, url, &remote_key)
+        self.with_remote_cache_for_key(git, url, &remote_key, f)
     }
 
     pub fn ensure_snapshot_for_commit(
@@ -62,15 +74,15 @@ impl Store {
         let remote_key = self.remote_key(git, url)?;
         let snapshot_key = self.snapshot_key(git, url, commit)?;
         let snapshot_dir = self.snapshot_dir_for_keys(&remote_key, &snapshot_key);
-        if snapshot_dir.exists() {
-            return Ok(snapshot_dir);
-        }
-
-        let remote_dir = self.ensure_remote_cache_for_key(git, url, &remote_key)?;
-        git.ensure_commit_available(&remote_dir, commit)?;
-        git.materialize_snapshot(&remote_dir, commit, &snapshot_dir)?;
-        make_read_only(&snapshot_dir)?;
-        Ok(snapshot_dir)
+        self.with_remote_cache_for_key(git, url, &remote_key, |remote_dir| {
+            if snapshot_dir.exists() {
+                return Ok(snapshot_dir.clone());
+            }
+            git.ensure_commit_available(remote_dir, commit)?;
+            git.materialize_snapshot(remote_dir, commit, &snapshot_dir)?;
+            make_read_only(&snapshot_dir)?;
+            Ok(snapshot_dir)
+        })
     }
 
     pub fn refresh_root(&self, git: &Git, lock_path: &Path) -> Result<PathBuf> {
@@ -120,7 +132,16 @@ impl Store {
                 }
             };
 
-            let lockfile = Lockfile::load(&lock_path)?;
+            let lockfile = match Lockfile::load(&lock_path) {
+                Ok(lockfile) => lockfile,
+                Err(error) => {
+                    report.warnings.push(format!(
+                        "skipped rooted lockfile {}: {error}",
+                        lock_path.display()
+                    ));
+                    continue;
+                }
+            };
             for repo in lockfile.entries() {
                 let Some(commit) = &repo.commit else {
                     continue;
@@ -197,9 +218,25 @@ impl Store {
         Ok(remote_dir)
     }
 
+    fn with_remote_cache_for_key<T>(
+        &self,
+        git: &Git,
+        url: &str,
+        remote_key: &str,
+        f: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = FileLock::acquire(&self.remote_lock_path(remote_key))?;
+        let remote_dir = self.ensure_remote_cache_for_key(git, url, remote_key)?;
+        f(&remote_dir)
+    }
+
     fn root_link(&self, git: &Git, canonical_lock_path: &Path) -> Result<PathBuf> {
         let root_key = git.hash_string(&canonical_lock_path.display().to_string())?;
         Ok(self.roots_dir().join(format!("{root_key}.lock")))
+    }
+
+    fn remote_lock_path(&self, remote_key: &str) -> PathBuf {
+        self.locks_dir().join(format!("remote-{remote_key}.lock"))
     }
 }
 

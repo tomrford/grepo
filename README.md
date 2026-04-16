@@ -9,10 +9,11 @@ Current behavior:
 - `grepo/` is tool-owned.
 - `grepo/.lock` is rewritten canonically by the tool.
 - `grepo/<alias>` entries are generated symlinks and may be replaced or pruned by `sync`.
-- `add` resolves and materializes immediately.
+- `add` resolves and materializes immediately, and refuses to replace an existing alias unless `--force` is passed.
+- `list` prints a concise view of configured aliases.
 - `sync` realizes the commits already recorded in `grepo/.lock`.
 - `update` advances tracked entries and rewrites `grepo/.lock`.
-- `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles.
+- `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles; `--verbose` includes per-path detail.
 
 The lockfile supports three states per alias:
 
@@ -31,6 +32,7 @@ Quick start:
 grepo init
 grepo add mint git@github.com:tomrford/mint.git
 grepo add polarion git@github.com:tomrford/polarionmcp.git --ref main
+grepo list
 grepo update
 ```
 
