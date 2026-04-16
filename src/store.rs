@@ -7,7 +7,7 @@ use crate::error::{GrepoError, Result};
 use crate::git::Git;
 use crate::manifest::Lockfile;
 use crate::mutation_lock::FileLock;
-use crate::util::{ensure_dir, is_valid_alias};
+use crate::util::{ensure_dir, ensure_dir_mode, is_valid_alias};
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -21,6 +21,10 @@ pub struct GcReport {
     pub removed_remotes: Vec<PathBuf>,
     pub removed_roots: Vec<PathBuf>,
     pub warnings: Vec<String>,
+}
+
+pub struct StoreMutationLock {
+    _lock: FileLock,
 }
 
 impl Store {
@@ -47,12 +51,26 @@ impl Store {
         self.state_root.join("locks")
     }
 
+    fn store_lock_path(&self) -> PathBuf {
+        self.locks_dir().join("store.lock")
+    }
+
     pub(crate) fn prepare(&self) -> Result<()> {
-        ensure_dir(&self.snapshots_dir())?;
-        ensure_dir(&self.remotes_dir())?;
-        ensure_dir(&self.roots_dir())?;
-        ensure_dir(&self.locks_dir())?;
+        ensure_dir_mode(&self.cache_root, 0o700)?;
+        ensure_dir_mode(&self.state_root, 0o700)?;
+        ensure_dir_mode(&self.snapshots_dir(), 0o700)?;
+        ensure_dir_mode(&self.remotes_dir(), 0o700)?;
+        ensure_dir_mode(&self.roots_dir(), 0o700)?;
+        ensure_dir_mode(&self.locks_dir(), 0o700)?;
         Ok(())
+    }
+
+    pub fn lock_mutation(&self) -> Result<StoreMutationLock> {
+        let lock = FileLock::try_acquire(&self.store_lock_path())?;
+        let Some(lock) = lock else {
+            return Err(GrepoError::StoreBusy(self.state_root.clone()));
+        };
+        Ok(StoreMutationLock { _lock: lock })
     }
 
     pub fn with_remote_cache<T>(
@@ -286,14 +304,26 @@ pub fn is_managed_symlink_name(name: &str) -> bool {
 }
 
 fn make_read_only(root: &Path) -> Result<()> {
-    rewrite_tree_modes(root, |mode| mode & !0o222)
+    rewrite_tree_modes(root, |is_dir, mode| {
+        if is_dir || mode & 0o100 != 0 {
+            0o500
+        } else {
+            0o400
+        }
+    })
 }
 
 fn make_writable(root: &Path) -> Result<()> {
-    rewrite_tree_modes(root, |mode| mode | 0o700)
+    rewrite_tree_modes(root, |is_dir, mode| {
+        if is_dir || mode & 0o100 != 0 {
+            0o700
+        } else {
+            0o600
+        }
+    })
 }
 
-fn rewrite_tree_modes(root: &Path, rewrite: impl Fn(u32) -> u32) -> Result<()> {
+fn rewrite_tree_modes(root: &Path, rewrite: impl Fn(bool, u32) -> u32) -> Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
         let metadata = fs::symlink_metadata(&path)
@@ -304,7 +334,7 @@ fn rewrite_tree_modes(root: &Path, rewrite: impl Fn(u32) -> u32) -> Result<()> {
         }
 
         let mut permissions = metadata.permissions();
-        permissions.set_mode(rewrite(permissions.mode()));
+        permissions.set_mode(rewrite(file_type.is_dir(), permissions.mode()));
         fs::set_permissions(&path, permissions).map_err(|e| {
             GrepoError::Io(format!(
                 "failed to set permissions on {}: {e}",

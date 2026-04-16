@@ -663,6 +663,59 @@ fn add_rejects_leading_dot_aliases() {
 }
 
 #[test]
+fn add_rejects_refs_that_start_with_dash() {
+    let root = TestDir::new("dash-ref");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+
+    let error = run_for_test(
+        workspace.clone(),
+        cache_root,
+        state_root,
+        "git".into(),
+        &[
+            "add",
+            "docs",
+            remote.to_str().unwrap(),
+            "--ref=--upload-pack=/bin/echo",
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(format!("{error}"), "invalid ref: --upload-pack=/bin/echo");
+    assert!(!workspace.join("grepo").exists());
+}
+
+#[test]
+fn add_rejects_non_oid_commit_values() {
+    let root = TestDir::new("bad-commit");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+
+    let error = run_for_test(
+        workspace.clone(),
+        cache_root,
+        state_root,
+        "git".into(),
+        &["add", "docs", remote.to_str().unwrap(), "--commit=--orphan"],
+    )
+    .unwrap_err();
+    assert_eq!(format!("{error}"), "invalid commit: --orphan");
+    assert!(!workspace.join("grepo").exists());
+}
+
+#[test]
 fn add_ref_named_default_is_not_ambiguous_in_lockfile() {
     let root = TestDir::new("named-default-ref");
     let workspace = root.path.join("workspace");
@@ -819,6 +872,50 @@ fn sync_reports_busy_mutation_lock() {
         format!(
             "another grepo command is already mutating {}",
             workspace.join("grepo").display()
+        )
+    );
+}
+
+#[test]
+fn gc_reports_busy_shared_store_lock() {
+    let root = TestDir::new("busy-store-lock");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&workspace).unwrap();
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+
+    let lock_path = state_root.join("locks/store.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    file.try_lock_exclusive().unwrap();
+
+    let error = run_for_test(
+        workspace,
+        cache_root,
+        state_root.clone(),
+        "git".into(),
+        &["gc"],
+    )
+    .unwrap_err();
+    assert_eq!(
+        format!("{error}"),
+        format!(
+            "another grepo command is already mutating shared store {}",
+            state_root.display()
         )
     );
 }
@@ -988,6 +1085,102 @@ fn update_explicit_exact_pin_reports_skip_instead_of_false_success() {
     assert!(report.stderr().is_empty());
 }
 
+#[test]
+fn add_repairs_half_initialized_remote_cache() {
+    let root = TestDir::new("repair-remote-cache");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "README.md", "hello\n");
+
+    let remote_key = git_hash_string(remote.to_str().unwrap());
+    let broken_cache = cache_root.join("remotes").join(format!("{remote_key}.git"));
+    fs::create_dir_all(broken_cache.parent().unwrap()).unwrap();
+    git(None, &["init", "--bare", broken_cache.to_str().unwrap()]);
+
+    let report = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root,
+        "git".into(),
+        &["add", "docs", remote.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
+    assert!(report.stdout()[0].starts_with("added docs -> "));
+    assert_eq!(
+        git_output(
+            None,
+            &[
+                "--git-dir",
+                broken_cache.to_str().unwrap(),
+                "config",
+                "--get",
+                "remote.origin.url"
+            ]
+        ),
+        remote.to_str().unwrap()
+    );
+}
+
+#[test]
+fn sync_warns_on_invalid_ref_before_running_git() {
+    let root = TestDir::new("invalid-lock-ref");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::write(
+        workspace.join("grepo/.lock"),
+        r#"[repos.docs]
+url = "git@example.com:org/docs.git"
+mode = "ref"
+ref = "--upload-pack=/bin/echo"
+"#,
+    )
+    .unwrap();
+
+    let report = run_for_test(workspace, cache_root, state_root, "git".into(), &["sync"]).unwrap();
+    assert_eq!(report.exit_code(), ExitCode::from(1));
+    assert_eq!(
+        report.stderr(),
+        &["warning: failed to sync docs: invalid ref: --upload-pack=/bin/echo".to_string()]
+    );
+}
+
+#[test]
+fn add_uses_owner_only_store_permissions() {
+    let root = TestDir::new("store-perms");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    let remote = root.path.join("remote.git");
+    let seed = root.path.join("seed");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_remote_repo(&remote, &seed, "secret.txt", "secret\n");
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["add", "docs", remote.to_str().unwrap()],
+    )
+    .unwrap();
+
+    let snapshot_dir = fs::canonicalize(workspace.join("grepo/docs")).unwrap();
+    let snapshot_file = snapshot_dir.join("secret.txt");
+    assert_eq!(mode_bits(&cache_root), 0o700);
+    assert_eq!(mode_bits(&state_root), 0o700);
+    assert_eq!(mode_bits(&snapshot_dir), 0o500);
+    assert_eq!(mode_bits(&snapshot_file), 0o400);
+}
+
 fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str) {
     git(None, &["init", "--bare", remote.to_str().unwrap()]);
     git(
@@ -1028,6 +1221,26 @@ fn git_output(cwd: Option<&Path>, args: &[&str]) -> String {
     }
     let output = command.args(args).output().unwrap();
     assert!(output.status.success(), "git {:?} failed", args);
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn git_hash_string(value: &str) -> String {
+    let mut command = Command::new("git");
+    command.args(["hash-object", "--stdin"]);
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(value.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "git hash-object failed");
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
@@ -1074,4 +1287,8 @@ fn make_tree_writable(root: &Path) {
             }
         }
     }
+}
+
+fn mode_bits(path: &Path) -> u32 {
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }

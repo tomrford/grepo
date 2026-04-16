@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::cli::{Cli, Command as CliCommand, GcArgs, RemoveArgs, UpdateArgs};
 use crate::error::{GrepoError, Result};
-use crate::git::{Git, ResolveSpec};
+use crate::git::{Git, ResolveSpec, validate_commit_oid, validate_ref_name};
 use crate::manifest::{LockEntry, LockMode, Lockfile};
 use crate::mutation_lock::MutationLock;
 use crate::output::RunReport;
@@ -153,8 +153,8 @@ impl TryFrom<CliCommand> for Command {
             CliCommand::Add(args) => Ok(Self::Add(AddArgs {
                 alias: validate_alias(args.alias)?,
                 url: args.url,
-                ref_name: args.ref_name,
-                commit: args.commit,
+                ref_name: validate_optional_ref(args.ref_name)?,
+                commit: validate_optional_commit(args.commit)?,
                 force: args.force,
             })),
             CliCommand::List => Ok(Self::List),
@@ -189,6 +189,7 @@ fn init(context: &AppContext) -> Result<RunReport> {
     let root = ProjectRoot::create_at(&context.cwd)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
     store.refresh_root(&context.git, &root.lock_path)?;
 
     let mut report = RunReport::success();
@@ -208,6 +209,7 @@ fn add(context: &AppContext, args: AddArgs) -> Result<RunReport> {
     };
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
 
     let mut lockfile = root.load_lockfile()?;
     let existing = lockfile.get(&args.alias).cloned();
@@ -258,6 +260,7 @@ fn remove(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
     let mut lockfile = root.load_lockfile()?;
     let selected = lockfile.select_aliases(aliases)?;
 
@@ -285,6 +288,7 @@ fn sync(context: &AppContext) -> Result<RunReport> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
     let mut lockfile = root.load_lockfile()?;
     let mut dirty_lock = false;
     let mut report = RunReport::success();
@@ -326,6 +330,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
     let mut lockfile = root.load_lockfile()?;
     let selected = lockfile.select_aliases(aliases)?;
     let explicit_aliases = !aliases.is_empty();
@@ -371,6 +376,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
 
 fn gc(context: &AppContext, verbose: bool) -> Result<RunReport> {
     let store = prepared_store(context)?;
+    let _store_lock = store.lock_mutation()?;
     let gc_report = store.gc(&context.git)?;
     let mut report = RunReport::success();
     append_gc_report(&mut report, &gc_report, verbose);
@@ -386,6 +392,7 @@ fn realize_entry(
     entry: &LockEntry,
     refresh_tracking: bool,
 ) -> Result<RealizedAlias> {
+    validate_git_entry(entry)?;
     let mut updated = entry.clone();
     if refresh_tracking || updated.commit.is_none() {
         if updated.can_update() {
@@ -539,6 +546,36 @@ fn validate_alias(alias: String) -> Result<String> {
 
 fn validate_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
     aliases.into_iter().map(validate_alias).collect()
+}
+
+fn validate_optional_ref(ref_name: Option<String>) -> Result<Option<String>> {
+    ref_name
+        .map(|value| {
+            validate_ref_name(&value)?;
+            Ok(value)
+        })
+        .transpose()
+}
+
+fn validate_optional_commit(commit: Option<String>) -> Result<Option<String>> {
+    commit
+        .map(|value| {
+            validate_commit_oid(&value)?;
+            Ok(value)
+        })
+        .transpose()
+}
+
+fn validate_git_entry(entry: &LockEntry) -> Result<()> {
+    match &entry.mode {
+        LockMode::Default => {}
+        LockMode::Ref { ref_name } => validate_ref_name(ref_name)?,
+        LockMode::Exact => {}
+    }
+    if let Some(commit) = &entry.commit {
+        validate_commit_oid(commit)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

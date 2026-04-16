@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
@@ -29,6 +30,16 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| {
         GrepoError::Io(format!(
             "failed to create directory {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+pub fn ensure_dir_mode(path: &Path, mode: u32) -> Result<()> {
+    ensure_dir(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| {
+        GrepoError::Io(format!(
+            "failed to set permissions on {}: {e}",
             path.display()
         ))
     })

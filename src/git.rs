@@ -1,8 +1,9 @@
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::Path;
 
 use crate::error::{GrepoError, Result};
-use crate::util::{ensure_dir, run_command, unique_path};
+use crate::util::{ensure_dir_mode, run_command, unique_path};
 
 #[derive(Clone, Debug)]
 pub struct Git {
@@ -29,35 +30,33 @@ impl Git {
     }
 
     pub fn ensure_remote_cache(&self, remote_dir: &Path, url: &str) -> Result<()> {
-        if remote_dir.exists() {
-            return Ok(());
-        }
-
         let parent = remote_dir.parent().ok_or_else(|| {
             GrepoError::Io(format!(
                 "remote cache path has no parent: {}",
                 remote_dir.display()
             ))
         })?;
-        ensure_dir(parent)?;
+        ensure_dir_mode(parent, 0o700)?;
 
-        let init_args = self.base_args([
-            OsString::from("init"),
-            OsString::from("--bare"),
-            remote_dir.as_os_str().to_os_string(),
-        ]);
-        run_command(self.program(), &init_args, None, None)?.check()?;
+        if remote_dir.exists() {
+            if self.remote_origin_matches(remote_dir, url)? {
+                return Ok(());
+            }
+            remove_path(remote_dir)?;
+        }
 
-        let add_remote_args = self.git_dir_args(
-            remote_dir,
-            [
-                OsString::from("remote"),
-                OsString::from("add"),
-                OsString::from("origin"),
-                OsString::from(url),
-            ],
-        );
-        run_command(self.program(), &add_remote_args, None, None)?.check()?;
+        let temp_remote_dir = unique_path(parent, ".grepo-remote");
+        if let Err(error) = self.initialize_remote_cache(&temp_remote_dir, url) {
+            let _ = remove_path(&temp_remote_dir);
+            return Err(error);
+        }
+        fs::rename(&temp_remote_dir, remote_dir).map_err(|e| {
+            GrepoError::Io(format!(
+                "failed to move remote cache into place {} -> {}: {e}",
+                temp_remote_dir.display(),
+                remote_dir.display()
+            ))
+        })?;
 
         Ok(())
     }
@@ -99,7 +98,7 @@ impl Git {
                 target_dir.display()
             ))
         })?;
-        ensure_dir(parent)?;
+        ensure_dir_mode(parent, 0o700)?;
         let temp_checkout = unique_path(parent, ".grepo-checkout");
 
         let clone_args = self.base_args([
@@ -121,19 +120,19 @@ impl Git {
             OsString::from(commit),
         ]);
         if let Err(error) = run_command(self.program(), &checkout_args, None, None)?.check() {
-            let _ = std::fs::remove_dir_all(&temp_checkout);
+            let _ = remove_path(&temp_checkout);
             return Err(error);
         }
 
         let git_dir = temp_checkout.join(".git");
-        std::fs::remove_dir_all(&git_dir).map_err(|e| {
+        fs::remove_dir_all(&git_dir).map_err(|e| {
             GrepoError::Io(format!(
                 "failed to strip .git from {}: {e}",
                 temp_checkout.display()
             ))
         })?;
 
-        std::fs::rename(&temp_checkout, target_dir).map_err(|e| {
+        fs::rename(&temp_checkout, target_dir).map_err(|e| {
             GrepoError::Io(format!(
                 "failed to move snapshot into place {} -> {}: {e}",
                 temp_checkout.display(),
@@ -146,6 +145,45 @@ impl Git {
 
     pub fn program(&self) -> &OsStr {
         &self.program
+    }
+
+    fn initialize_remote_cache(&self, remote_dir: &Path, url: &str) -> Result<()> {
+        let init_args = self.base_args([
+            OsString::from("init"),
+            OsString::from("--bare"),
+            remote_dir.as_os_str().to_os_string(),
+        ]);
+        run_command(self.program(), &init_args, None, None)?.check()?;
+        ensure_dir_mode(remote_dir, 0o700)?;
+
+        let add_remote_args = self.git_dir_args(
+            remote_dir,
+            [
+                OsString::from("remote"),
+                OsString::from("add"),
+                OsString::from("origin"),
+                OsString::from(url),
+            ],
+        );
+        run_command(self.program(), &add_remote_args, None, None)?.check()?;
+
+        Ok(())
+    }
+
+    fn remote_origin_matches(&self, remote_dir: &Path, expected_url: &str) -> Result<bool> {
+        let args = self.git_dir_args(
+            remote_dir,
+            [
+                OsString::from("config"),
+                OsString::from("--get"),
+                OsString::from("remote.origin.url"),
+            ],
+        );
+        let output = run_command(self.program(), &args, None, None)?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        Ok(output.stdout.trim() == expected_url)
     }
 
     fn fetch_default_head(&self, remote_dir: &Path) -> Result<String> {
@@ -223,4 +261,71 @@ impl Git {
         args.extend(tail);
         args
     }
+}
+
+pub fn validate_ref_name(ref_name: &str) -> Result<()> {
+    if ref_name.is_empty()
+        || ref_name.starts_with('-')
+        || ref_name.starts_with('/')
+        || ref_name.ends_with('/')
+        || ref_name.ends_with('.')
+        || ref_name.contains("//")
+        || ref_name.contains("..")
+        || ref_name.contains("@{")
+    {
+        return Err(GrepoError::InvalidRef(ref_name.to_string()));
+    }
+
+    if ref_name.as_bytes().iter().any(|byte| {
+        byte.is_ascii_control()
+            || matches!(
+                *byte,
+                b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\'
+            )
+    }) {
+        return Err(GrepoError::InvalidRef(ref_name.to_string()));
+    }
+
+    for component in ref_name.split('/') {
+        if component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with(".lock")
+            || component.ends_with('.')
+        {
+            return Err(GrepoError::InvalidRef(ref_name.to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_commit_oid(commit: &str) -> Result<()> {
+    let valid_length = matches!(commit.len(), 40 | 64);
+    if !valid_length || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GrepoError::InvalidCommit(commit.to_string()));
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(GrepoError::Io(format!(
+                "failed to inspect {}: {e}",
+                path.display()
+            )));
+        }
+    };
+
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+            .map_err(|e| GrepoError::Io(format!("failed to remove {}: {e}", path.display())))?;
+    } else {
+        fs::remove_file(path)
+            .map_err(|e| GrepoError::Io(format!("failed to remove {}: {e}", path.display())))?;
+    }
+
+    Ok(())
 }

@@ -24,6 +24,12 @@ pub enum GrepoError {
     #[error("invalid alias: {0}")]
     InvalidAlias(String),
 
+    #[error("invalid ref: {0}")]
+    InvalidRef(String),
+
+    #[error("invalid commit: {0}")]
+    InvalidCommit(String),
+
     #[error("invalid alias in grepo/.lock: {0}")]
     InvalidLockAlias(String),
 
@@ -47,4 +53,7 @@ pub enum GrepoError {
 
     #[error("another grepo command is already mutating {0}")]
     Busy(PathBuf),
+
+    #[error("another grepo command is already mutating shared store {0}")]
+    StoreBusy(PathBuf),
 }

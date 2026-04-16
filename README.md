@@ -4,6 +4,8 @@
 
 It keeps `grepo/.lock` as the tracked source of truth, materializes read-only snapshots in a shared local cache, and exposes stable symlinks like `grepo/mint` inside the project.
 
+`grepo` shells out to your installed `git` for transport, auth, and private-repo access. Treat repo URLs and checked-in `grepo/.lock` files as trusted inputs; `grepo` intentionally relies on your local git configuration instead of reimplementing credentials or transport policy.
+
 Current behavior:
 
 - `grepo/` is tool-owned.
@@ -19,12 +21,13 @@ The lockfile supports three states per alias:
 
 - `mode = "default"` follows the remote default branch on `update`.
 - `mode = "ref"` plus `ref = "..."` follows that named ref on `update`.
-- `mode = "exact"` plus `commit = "..."` is an exact pin.
+- `mode = "exact"` plus `commit = "..."` is an exact pin using a full hex object id.
 
 Storage follows OS conventions:
 
 - cache: `~/Library/Caches/grepo` on macOS, `${XDG_CACHE_HOME:-~/.cache}/grepo` on Linux
 - state: `~/Library/Application Support/grepo` on macOS, `${XDG_STATE_HOME:-~/.local/state}/grepo` on Linux when available, otherwise the local data directory
+- store directories and cached snapshots are owner-only by default
 
 Quick start:
 
