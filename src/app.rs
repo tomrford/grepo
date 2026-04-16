@@ -589,7 +589,7 @@ fn validate_git_entry(entry: &LockEntry) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(feature = "git-integration-tests")]
 pub(crate) fn run_for_test(
     cwd: PathBuf,
     cache_root: PathBuf,

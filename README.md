@@ -40,6 +40,10 @@ grepo list
 grepo update
 ```
 
+Development:
+
+`cargo test` runs the fast default suite. The git-backed integration tests are opt-in and expect `git` on `PATH`: `cargo test --features git-integration-tests`.
+
 Agent integration:
 
 `grepo skill` prints the shipped [`skill/grepo/SKILL.md`](skill/grepo/SKILL.md) text to stdout so an agent can load the exact guidance without guessing the path.

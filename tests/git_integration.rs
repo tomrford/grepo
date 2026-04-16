@@ -5,8 +5,7 @@ use std::process::Command;
 use std::process::ExitCode;
 
 use fs4::fs_std::FileExt;
-
-use crate::app::run_for_test;
+use grepo::run_for_test;
 
 struct TestDir {
     path: PathBuf,

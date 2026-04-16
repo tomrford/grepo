@@ -8,6 +8,16 @@ readme = "README.md"
 repository = "https://github.com/tomrford/grepo"
 homepage = "https://github.com/tomrford/grepo"
 documentation = "https://docs.rs/grepo"
+autotests = false
+
+[features]
+default = []
+git-integration-tests = []
+
+[[test]]
+name = "git_integration"
+path = "tests/git_integration.rs"
+required-features = ["git-integration-tests"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

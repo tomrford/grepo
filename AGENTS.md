@@ -15,5 +15,6 @@ Current shape:
 - Use `nix develop` for the toolchain.
 - Build: `cargo build`
 - Test: `cargo test`
+- Full git-backed integration suite: `cargo test --features git-integration-tests`
 - Format: `cargo fmt`
 - Lint: `cargo clippy`
