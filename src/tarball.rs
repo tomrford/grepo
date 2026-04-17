@@ -95,6 +95,11 @@ fn unpack_into(bytes: &[u8], dest: &Path) -> Result<PathBuf> {
         }
 
         let full = dest.join(&path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                GrepoError::Io(format!("failed to create {}: {e}", parent.display()))
+            })?;
+        }
         entry
             .unpack(&full)
             .map_err(|e| GrepoError::Io(format!("failed to extract {}: {e}", full.display())))?;
@@ -122,7 +127,14 @@ fn ensure_safe_relative_path(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::Builder;
+
     use super::*;
+    use crate::util::unique_path;
 
     #[test]
     fn sha256_check_passes_for_known_value() {
@@ -146,5 +158,60 @@ mod tests {
     fn rejects_parent_escape() {
         let err = ensure_safe_relative_path(Path::new("../foo")).unwrap_err();
         assert!(format!("{err}").contains("disallowed"));
+    }
+
+    #[test]
+    fn extract_crate_tarball_handles_file_entries_without_explicit_dirs() {
+        let bytes = crate_tarball_bytes();
+        let temp_root = unique_path(&std::env::temp_dir(), "grepo-tarball-test");
+        fs::create_dir(&temp_root).unwrap();
+        let target = temp_root.join("serde");
+
+        extract_crate_tarball(&bytes, &target).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(target.join("Cargo.toml")).unwrap(),
+            "name = \"serde\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(".cargo_vcs_info.json")).unwrap(),
+            "{}\n"
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    fn crate_tarball_bytes() -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+
+        let mut cargo_header = tar::Header::new_gnu();
+        let cargo_bytes = b"name = \"serde\"\n";
+        cargo_header.set_size(cargo_bytes.len() as u64);
+        cargo_header.set_mode(0o644);
+        cargo_header.set_cksum();
+        builder
+            .append_data(
+                &mut cargo_header,
+                "serde-1.0.228/Cargo.toml",
+                Cursor::new(cargo_bytes),
+            )
+            .unwrap();
+
+        let mut vcs_header = tar::Header::new_gnu();
+        let vcs_bytes = b"{}\n";
+        vcs_header.set_size(vcs_bytes.len() as u64);
+        vcs_header.set_mode(0o644);
+        vcs_header.set_cksum();
+        builder
+            .append_data(
+                &mut vcs_header,
+                "serde-1.0.228/.cargo_vcs_info.json",
+                Cursor::new(vcs_bytes),
+            )
+            .unwrap();
+
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
     }
 }

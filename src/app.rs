@@ -328,7 +328,7 @@ fn build_entry(args: &AddCommand) -> Result<LockEntry> {
                 source: Some(source),
                 url: String::new(), // resolved during realize
                 subdir: args.subdir.clone(),
-                mode: LockMode::Exact,
+                mode: source_lock_mode(spec),
                 commit: None,
             }))
         }
@@ -515,13 +515,14 @@ fn realize_git_entry(
     let needs_package_resolve = updated.source.is_some()
         && (refresh_tracking || updated.url.is_empty() || updated.commit.is_none());
     if needs_package_resolve {
-        let resolved = resolve_npm_source(updated.source.as_deref().unwrap_or(""))?;
+        let source = updated.source.clone().unwrap_or_default();
+        let resolved = resolve_npm_source(&source)?;
         updated.url = resolved.url;
         updated.commit = Some(resolved.commit);
         if updated.subdir.is_none() {
             updated.subdir = resolved.subdir;
         }
-        updated.mode = LockMode::Exact;
+        updated.mode = lock_mode_for_source(&source)?;
     } else if refresh_tracking || updated.commit.is_none() {
         if !matches!(updated.mode, LockMode::Exact) {
             updated.commit = Some(resolve_tracking_commit(context, store, &updated)?);
@@ -578,11 +579,8 @@ fn resolve_npm_source(source: &str) -> Result<NpmResolved> {
             "expected npm source, got \"{source}\""
         )));
     };
-    let version = version.ok_or_else(|| {
-        GrepoError::InvalidSource(format!("npm source \"{source}\" requires an exact version"))
-    })?;
     let agent = registry::http_agent();
-    registry::resolve_npm(&agent, &name, &version)
+    registry::resolve_npm(&agent, &name, version.as_deref())
 }
 
 fn resolve_cargo_source(source: &str) -> Result<CargoResolved> {
@@ -592,13 +590,8 @@ fn resolve_cargo_source(source: &str) -> Result<CargoResolved> {
             "expected cargo source, got \"{source}\""
         )));
     };
-    let version = version.ok_or_else(|| {
-        GrepoError::InvalidSource(format!(
-            "cargo source \"{source}\" requires an exact version"
-        ))
-    })?;
     let agent = registry::http_agent();
-    registry::resolve_cargo(&agent, &name, &version)
+    registry::resolve_cargo(&agent, &name, version.as_deref())
 }
 
 fn resolve_tracking_commit(
@@ -772,6 +765,19 @@ fn validate_optional_commit(commit: Option<String>) -> Result<Option<String>> {
         .transpose()
 }
 
+fn source_lock_mode(spec: &SourceSpec) -> LockMode {
+    match spec {
+        SourceSpec::Npm { version, .. } if version.is_none() => LockMode::Default,
+        SourceSpec::Npm { .. } => LockMode::Exact,
+        SourceSpec::Cargo { .. } => LockMode::Exact,
+    }
+}
+
+fn lock_mode_for_source(source: &str) -> Result<LockMode> {
+    let spec = SourceSpec::parse_lock_source(source)?;
+    Ok(source_lock_mode(&spec))
+}
+
 fn validate_git_entry(entry: &GitLockEntry) -> Result<()> {
     match &entry.mode {
         LockMode::Default => {}
@@ -808,4 +814,59 @@ pub(crate) fn run_for_test(
         git: Git::new(git_program),
     };
     command.run(&context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_entry_tracks_plain_npm_specs() {
+        let entry = build_entry(&AddCommand {
+            alias: "react".into(),
+            source: AddSource::Npm {
+                spec: SourceSpec::parse_npm("react").unwrap(),
+            },
+            subdir: None,
+            force: false,
+        })
+        .unwrap();
+
+        let LockEntry::Git(entry) = entry else {
+            panic!();
+        };
+        assert_eq!(entry.source.as_deref(), Some("npm:react"));
+        assert!(matches!(entry.mode, LockMode::Default));
+    }
+
+    #[test]
+    fn build_entry_pins_versioned_npm_specs() {
+        let entry = build_entry(&AddCommand {
+            alias: "react".into(),
+            source: AddSource::Npm {
+                spec: SourceSpec::parse_npm("react@19.2.5").unwrap(),
+            },
+            subdir: None,
+            force: false,
+        })
+        .unwrap();
+
+        let LockEntry::Git(entry) = entry else {
+            panic!();
+        };
+        assert_eq!(entry.source.as_deref(), Some("npm:react@19.2.5"));
+        assert!(matches!(entry.mode, LockMode::Exact));
+    }
+
+    #[test]
+    fn lock_mode_for_source_tracks_versionless_npm_sources() {
+        assert!(matches!(
+            lock_mode_for_source("npm:react").unwrap(),
+            LockMode::Default
+        ));
+        assert!(matches!(
+            lock_mode_for_source("npm:react@19.2.5").unwrap(),
+            LockMode::Exact
+        ));
+    }
 }

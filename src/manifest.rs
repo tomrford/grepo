@@ -55,7 +55,13 @@ impl LockEntry {
 
     pub fn can_update(&self) -> bool {
         match self {
-            Self::Git(entry) => !matches!(entry.mode, LockMode::Exact),
+            Self::Git(entry) => {
+                if entry.source.is_some() {
+                    entry_has_movable_source(entry.source.as_deref())
+                } else {
+                    !matches!(entry.mode, LockMode::Exact)
+                }
+            }
             // Tarball entries are always pinned to a concrete version; `update` re-resolves
             // the source string against the registry, which may produce a new sha.
             Self::Tarball(_) => entry_has_movable_source(self.source()),
@@ -445,5 +451,33 @@ mode = "default"
         .unwrap_err();
 
         assert_eq!(error.to_string(), "invalid alias in grepo/.lock: .bad");
+    }
+
+    #[test]
+    fn versionless_package_git_sources_can_update_even_if_stored_exact() {
+        let entry = LockEntry::Git(GitLockEntry {
+            alias: "react".into(),
+            source: Some("npm:react".into()),
+            url: "https://github.com/facebook/react.git".into(),
+            subdir: Some("packages/react".into()),
+            mode: LockMode::Exact,
+            commit: Some("be229c5655074642ee664f532f2e7411dd7dccc7".into()),
+        });
+
+        assert!(entry.can_update());
+    }
+
+    #[test]
+    fn versioned_package_git_sources_stay_pinned_even_if_mode_is_tracking() {
+        let entry = LockEntry::Git(GitLockEntry {
+            alias: "react".into(),
+            source: Some("npm:react@19.2.5".into()),
+            url: "https://github.com/facebook/react.git".into(),
+            subdir: Some("packages/react".into()),
+            mode: LockMode::Default,
+            commit: Some("be229c5655074642ee664f532f2e7411dd7dccc7".into()),
+        });
+
+        assert!(!entry.can_update());
     }
 }
