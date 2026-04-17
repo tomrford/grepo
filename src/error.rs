@@ -56,4 +56,19 @@ pub enum GrepoError {
 
     #[error("another grepo command is already mutating shared store {0}")]
     StoreBusy(PathBuf),
+
+    #[error("invalid grepo/.lock entry: {0}")]
+    LockShape(String),
+
+    #[error("invalid source spec: {0}")]
+    InvalidSource(String),
+
+    #[error("invalid subdir: {0}")]
+    InvalidSubdir(String),
+
+    #[error("registry request failed: {0}")]
+    Registry(String),
+
+    #[error("integrity check failed: {0}")]
+    Integrity(String),
 }

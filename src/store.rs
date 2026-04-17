@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{GrepoError, Result};
 use crate::git::Git;
-use crate::manifest::Lockfile;
+use crate::manifest::{LockEntry, Lockfile};
 use crate::mutation_lock::FileLock;
+use crate::registry::{self, get_bytes};
+use crate::tarball;
 use crate::util::{ensure_dir, ensure_dir_mode, is_valid_alias};
 
 #[derive(Clone, Debug)]
@@ -39,6 +41,10 @@ impl Store {
         self.cache_root.join("snapshots")
     }
 
+    fn tarballs_dir(&self) -> PathBuf {
+        self.cache_root.join("tarballs")
+    }
+
     fn remotes_dir(&self) -> PathBuf {
         self.cache_root.join("remotes")
     }
@@ -59,6 +65,7 @@ impl Store {
         ensure_dir_mode(&self.cache_root, 0o700)?;
         ensure_dir_mode(&self.state_root, 0o700)?;
         ensure_dir_mode(&self.snapshots_dir(), 0o700)?;
+        ensure_dir_mode(&self.tarballs_dir(), 0o700)?;
         ensure_dir_mode(&self.remotes_dir(), 0o700)?;
         ensure_dir_mode(&self.roots_dir(), 0o700)?;
         ensure_dir_mode(&self.locks_dir(), 0o700)?;
@@ -88,19 +95,34 @@ impl Store {
         git: &Git,
         url: &str,
         commit: &str,
+        subdir: Option<&str>,
     ) -> Result<PathBuf> {
         let remote_key = self.remote_key(git, url)?;
-        let snapshot_key = self.snapshot_key(git, url, commit)?;
+        let snapshot_key = self.snapshot_key(git, url, commit, subdir)?;
         let snapshot_dir = self.snapshot_dir_for_keys(&remote_key, &snapshot_key);
         self.with_remote_cache_for_key(git, url, &remote_key, |remote_dir| {
             if snapshot_dir.exists() {
                 return Ok(snapshot_dir.clone());
             }
             git.ensure_commit_available(remote_dir, commit)?;
-            git.materialize_snapshot(remote_dir, commit, &snapshot_dir)?;
+            git.materialize_snapshot(remote_dir, commit, &snapshot_dir, subdir)?;
             make_read_only(&snapshot_dir)?;
             Ok(snapshot_dir)
         })
+    }
+
+    pub fn ensure_snapshot_for_tarball(&self, download_url: &str, sha256: &str) -> Result<PathBuf> {
+        let snapshot_dir = self.tarball_dir_for_sha(sha256);
+        let _lock = FileLock::acquire(&self.tarball_lock_path(sha256))?;
+        if snapshot_dir.exists() {
+            return Ok(snapshot_dir);
+        }
+        let agent = registry::http_agent();
+        let bytes = get_bytes(&agent, download_url)?;
+        tarball::verify_sha256(&bytes, sha256)?;
+        tarball::extract_crate_tarball(&bytes, &snapshot_dir)?;
+        make_read_only(&snapshot_dir)?;
+        Ok(snapshot_dir)
     }
 
     pub fn refresh_root(&self, git: &Git, lock_path: &Path) -> Result<PathBuf> {
@@ -130,6 +152,7 @@ impl Store {
         let mut report = GcReport::default();
         let mut reachable_snapshots = BTreeSet::new();
         let mut reachable_remotes = BTreeSet::new();
+        let mut reachable_tarballs = BTreeSet::new();
 
         for entry in read_dir_paths(&self.roots_dir())? {
             let metadata = fs::symlink_metadata(&entry).map_err(|e| {
@@ -161,13 +184,26 @@ impl Store {
                 }
             };
             for repo in lockfile.entries() {
-                let Some(commit) = &repo.commit else {
-                    continue;
-                };
-                let remote_key = self.remote_key(git, &repo.url)?;
-                let snapshot_key = self.snapshot_key(git, &repo.url, commit)?;
-                reachable_snapshots.insert(self.snapshot_dir_for_keys(&remote_key, &snapshot_key));
-                reachable_remotes.insert(self.remote_dir_for_key(&remote_key));
+                match repo {
+                    LockEntry::Git(git_entry) => {
+                        let Some(commit) = &git_entry.commit else {
+                            continue;
+                        };
+                        let remote_key = self.remote_key(git, &git_entry.url)?;
+                        let snapshot_key = self.snapshot_key(
+                            git,
+                            &git_entry.url,
+                            commit,
+                            git_entry.subdir.as_deref(),
+                        )?;
+                        reachable_snapshots
+                            .insert(self.snapshot_dir_for_keys(&remote_key, &snapshot_key));
+                        reachable_remotes.insert(self.remote_dir_for_key(&remote_key));
+                    }
+                    LockEntry::Tarball(tarball_entry) => {
+                        reachable_tarballs.insert(self.tarball_dir_for_sha(&tarball_entry.sha256));
+                    }
+                }
             }
         }
 
@@ -206,6 +242,17 @@ impl Store {
             report.removed_remotes.push(remote_dir);
         }
 
+        for tarball_dir in read_dir_paths(&self.tarballs_dir())? {
+            if !tarball_dir.is_dir() || reachable_tarballs.contains(&tarball_dir) {
+                continue;
+            }
+            make_writable(&tarball_dir)?;
+            fs::remove_dir_all(&tarball_dir).map_err(|e| {
+                GrepoError::Io(format!("failed to remove {}: {e}", tarball_dir.display()))
+            })?;
+            report.removed_snapshots.push(tarball_dir);
+        }
+
         Ok(report)
     }
 
@@ -213,8 +260,15 @@ impl Store {
         git.hash_string(url)
     }
 
-    fn snapshot_key(&self, git: &Git, url: &str, commit: &str) -> Result<String> {
-        git.hash_string(&format!("{url}\n{commit}"))
+    fn snapshot_key(
+        &self,
+        git: &Git,
+        url: &str,
+        commit: &str,
+        subdir: Option<&str>,
+    ) -> Result<String> {
+        let payload = format!("{url}\n{commit}\n{}", subdir.unwrap_or(""));
+        git.hash_string(&payload)
     }
 
     fn remote_dir_for_key(&self, remote_key: &str) -> PathBuf {
@@ -223,6 +277,14 @@ impl Store {
 
     fn snapshot_dir_for_keys(&self, remote_key: &str, snapshot_key: &str) -> PathBuf {
         self.snapshots_dir().join(remote_key).join(snapshot_key)
+    }
+
+    fn tarball_dir_for_sha(&self, sha256: &str) -> PathBuf {
+        self.tarballs_dir().join(sha256)
+    }
+
+    fn tarball_lock_path(&self, sha256: &str) -> PathBuf {
+        self.locks_dir().join(format!("tarball-{sha256}.lock"))
     }
 
     fn ensure_remote_cache_for_key(

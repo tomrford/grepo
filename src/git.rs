@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{GrepoError, Result};
 use crate::util::{ensure_dir_mode, run_command, unique_path};
@@ -91,6 +91,7 @@ impl Git {
         remote_dir: &Path,
         commit: &str,
         target_dir: &Path,
+        subdir: Option<&str>,
     ) -> Result<()> {
         let parent = target_dir.parent().ok_or_else(|| {
             GrepoError::Io(format!(
@@ -132,13 +133,31 @@ impl Git {
             ))
         })?;
 
-        fs::rename(&temp_checkout, target_dir).map_err(|e| {
+        let final_source = match subdir {
+            Some(sub) => {
+                let sub_path = resolve_subdir(&temp_checkout, sub)?;
+                if !sub_path.is_dir() {
+                    let _ = remove_path(&temp_checkout);
+                    return Err(GrepoError::Io(format!(
+                        "subdir {sub} is not a directory at commit {commit}"
+                    )));
+                }
+                sub_path
+            }
+            None => temp_checkout.clone(),
+        };
+
+        fs::rename(&final_source, target_dir).map_err(|e| {
             GrepoError::Io(format!(
                 "failed to move snapshot into place {} -> {}: {e}",
-                temp_checkout.display(),
+                final_source.display(),
                 target_dir.display()
             ))
         })?;
+
+        if subdir.is_some() {
+            let _ = remove_path(&temp_checkout);
+        }
 
         Ok(())
     }
@@ -297,6 +316,31 @@ pub fn validate_ref_name(ref_name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn validate_subdir(subdir: &str) -> Result<()> {
+    use std::path::Component;
+    if subdir.is_empty() {
+        return Err(GrepoError::InvalidSubdir(subdir.to_string()));
+    }
+    let path = std::path::Path::new(subdir);
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let s = part.to_string_lossy();
+                if s.starts_with('.') || s.is_empty() {
+                    return Err(GrepoError::InvalidSubdir(subdir.to_string()));
+                }
+            }
+            _ => return Err(GrepoError::InvalidSubdir(subdir.to_string())),
+        }
+    }
+    Ok(())
+}
+
+fn resolve_subdir(root: &Path, subdir: &str) -> Result<PathBuf> {
+    validate_subdir(subdir)?;
+    Ok(root.join(subdir))
 }
 
 pub fn validate_commit_oid(commit: &str) -> Result<()> {
