@@ -51,6 +51,7 @@ fn run_env(args: Vec<OsString>) -> Result<RunReport> {
         cache_root: cache_root()?,
         state_root: state_root()?,
         git: Git::new("git"),
+        http_agent: registry::http_agent(),
     };
     command.run(&context)
 }
@@ -61,6 +62,7 @@ struct AppContext {
     cache_root: PathBuf,
     state_root: PathBuf,
     git: Git,
+    http_agent: ureq::Agent,
 }
 
 impl AppContext {
@@ -496,7 +498,7 @@ fn realize_entry(
     match entry {
         LockEntry::Git(git_entry) => realize_git_entry(context, store, git_entry, refresh_tracking),
         LockEntry::Tarball(tarball_entry) => {
-            realize_tarball_entry(store, tarball_entry, refresh_tracking)
+            realize_tarball_entry(context, store, tarball_entry, refresh_tracking)
         }
     }
 }
@@ -516,7 +518,7 @@ fn realize_git_entry(
         && (refresh_tracking || updated.url.is_empty() || updated.commit.is_none());
     if needs_package_resolve {
         let source = updated.source.clone().unwrap_or_default();
-        let resolved = resolve_npm_source(&source)?;
+        let resolved = resolve_npm_source(&context.http_agent, &source)?;
         updated.url = resolved.url;
         updated.commit = Some(resolved.commit);
         if updated.subdir.is_none() {
@@ -548,6 +550,7 @@ fn realize_git_entry(
 }
 
 fn realize_tarball_entry(
+    context: &AppContext,
     store: &Store,
     entry: &TarballLockEntry,
     refresh_tracking: bool,
@@ -555,7 +558,7 @@ fn realize_tarball_entry(
     let mut updated = entry.clone();
     let needs_resolve = refresh_tracking || updated.url.is_empty() || updated.sha256.is_empty();
     if needs_resolve {
-        let resolved = resolve_cargo_source(&updated.source)?;
+        let resolved = resolve_cargo_source(&context.http_agent, &updated.source)?;
         updated.url = resolved.download_url;
         updated.sha256 = resolved.sha256;
     }
@@ -565,33 +568,32 @@ fn realize_tarball_entry(
             updated.alias
         )));
     }
-    let snapshot_path = store.ensure_snapshot_for_tarball(&updated.url, &updated.sha256)?;
+    let snapshot_path =
+        store.ensure_snapshot_for_tarball(&context.http_agent, &updated.url, &updated.sha256)?;
     Ok(RealizedAlias {
         entry: LockEntry::Tarball(updated),
         snapshot_path,
     })
 }
 
-fn resolve_npm_source(source: &str) -> Result<NpmResolved> {
+fn resolve_npm_source(agent: &ureq::Agent, source: &str) -> Result<NpmResolved> {
     let spec = SourceSpec::parse_lock_source(source)?;
     let SourceSpec::Npm { name, version, .. } = spec else {
         return Err(GrepoError::InvalidSource(format!(
             "expected npm source, got \"{source}\""
         )));
     };
-    let agent = registry::http_agent();
-    registry::resolve_npm(&agent, &name, version.as_deref())
+    registry::resolve_npm(agent, &name, version.as_deref())
 }
 
-fn resolve_cargo_source(source: &str) -> Result<CargoResolved> {
+fn resolve_cargo_source(agent: &ureq::Agent, source: &str) -> Result<CargoResolved> {
     let spec = SourceSpec::parse_lock_source(source)?;
     let SourceSpec::Cargo { name, version, .. } = spec else {
         return Err(GrepoError::InvalidSource(format!(
             "expected cargo source, got \"{source}\""
         )));
     };
-    let agent = registry::http_agent();
-    registry::resolve_cargo(&agent, &name, version.as_deref())
+    registry::resolve_cargo(agent, &name, version.as_deref())
 }
 
 fn resolve_tracking_commit(
@@ -812,6 +814,7 @@ pub(crate) fn run_for_test(
         cache_root,
         state_root,
         git: Git::new(git_program),
+        http_agent: registry::http_agent(),
     };
     command.run(&context)
 }

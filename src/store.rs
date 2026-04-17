@@ -7,7 +7,7 @@ use crate::error::{GrepoError, Result};
 use crate::git::Git;
 use crate::manifest::{LockEntry, Lockfile};
 use crate::mutation_lock::FileLock;
-use crate::registry::{self, get_bytes};
+use crate::registry::get_bytes;
 use crate::tarball;
 use crate::util::{ensure_dir, ensure_dir_mode, is_valid_alias};
 
@@ -111,14 +111,18 @@ impl Store {
         })
     }
 
-    pub fn ensure_snapshot_for_tarball(&self, download_url: &str, sha256: &str) -> Result<PathBuf> {
+    pub fn ensure_snapshot_for_tarball(
+        &self,
+        agent: &ureq::Agent,
+        download_url: &str,
+        sha256: &str,
+    ) -> Result<PathBuf> {
         let snapshot_dir = self.tarball_dir_for_sha(sha256);
         let _lock = FileLock::acquire(&self.tarball_lock_path(sha256))?;
         if snapshot_dir.exists() {
             return Ok(snapshot_dir);
         }
-        let agent = registry::http_agent();
-        let bytes = get_bytes(&agent, download_url)?;
+        let bytes = get_bytes(agent, download_url)?;
         tarball::verify_sha256(&bytes, sha256)?;
         tarball::extract_crate_tarball(&bytes, &snapshot_dir)?;
         make_read_only(&snapshot_dir)?;

@@ -4,6 +4,12 @@ use serde::Deserialize;
 
 use crate::error::{GrepoError, Result};
 
+mod cargo;
+mod npm;
+
+pub use cargo::{CargoResolved, resolve_cargo};
+pub use npm::{NpmResolved, resolve_npm};
+
 const USER_AGENT: &str = concat!(
     "grepo/",
     env!("CARGO_PKG_VERSION"),
@@ -18,7 +24,7 @@ pub fn http_agent() -> ureq::Agent {
         .build()
 }
 
-pub fn get_json<T: for<'de> Deserialize<'de>>(agent: &ureq::Agent, url: &str) -> Result<T> {
+pub(crate) fn get_json<T: for<'de> Deserialize<'de>>(agent: &ureq::Agent, url: &str) -> Result<T> {
     let response = agent.get(url).call().map_err(|e| match e {
         ureq::Error::Status(code, resp) => GrepoError::Registry(format!(
             "GET {url} returned {code}: {}",
@@ -50,12 +56,10 @@ pub fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceSpec {
     Npm {
-        spec: String,
         name: String,
         version: Option<String>,
     },
     Cargo {
-        spec: String,
         name: String,
         version: Option<String>,
     },
@@ -64,8 +68,12 @@ pub enum SourceSpec {
 impl SourceSpec {
     pub fn to_source_string(&self) -> Option<String> {
         match self {
-            Self::Npm { spec, .. } => Some(format!("npm:{spec}")),
-            Self::Cargo { spec, .. } => Some(format!("cargo:{spec}")),
+            Self::Npm { name, version } => {
+                Some(format!("npm:{}", format_spec(name, version.as_deref())))
+            }
+            Self::Cargo { name, version } => {
+                Some(format!("cargo:{}", format_spec(name, version.as_deref())))
+            }
         }
     }
 
@@ -86,22 +94,21 @@ impl SourceSpec {
         let (name, version) =
             split_npm_spec(spec).ok_or_else(|| GrepoError::InvalidSource(format!("npm:{spec}")))?;
         require_exact_version(version.as_deref())?;
-        Ok(Self::Npm {
-            spec: spec.to_string(),
-            name,
-            version,
-        })
+        Ok(Self::Npm { name, version })
     }
 
     pub fn parse_cargo(spec: &str) -> Result<Self> {
         let (name, version) = split_at_version(spec)
             .ok_or_else(|| GrepoError::InvalidSource(format!("cargo:{spec}")))?;
         require_exact_version(version.as_deref())?;
-        Ok(Self::Cargo {
-            spec: spec.to_string(),
-            name,
-            version,
-        })
+        Ok(Self::Cargo { name, version })
+    }
+}
+
+fn format_spec(name: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{name}@{v}"),
+        None => name.to_string(),
     }
 }
 
@@ -113,7 +120,7 @@ fn require_exact_version(version: Option<&str>) -> Result<()> {
     if trimmed.is_empty() {
         return Err(GrepoError::InvalidSource("empty version".into()));
     }
-    // v1: reject anything that isn't obviously an exact version.
+    // Only exact versions are supported; reject range/wildcard/tag syntax.
     let first = trimmed.chars().next().unwrap();
     if matches!(first, '^' | '~' | '>' | '<' | '=') {
         return Err(GrepoError::InvalidSource(format!(
@@ -170,296 +177,6 @@ fn split_at_version(spec: &str) -> Option<(String, Option<String>)> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NpmResolved {
-    pub url: String,
-    pub subdir: Option<String>,
-    pub commit: String,
-    pub version: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CargoResolved {
-    pub version: String,
-    pub download_url: String,
-    pub sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmVersion {
-    #[serde(rename = "gitHead")]
-    git_head: Option<String>,
-    repository: Option<NpmRepository>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmPackage {
-    #[serde(rename = "dist-tags")]
-    dist_tags: NpmDistTags,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmDistTags {
-    latest: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum NpmRepository {
-    String(String),
-    Object {
-        #[serde(rename = "type")]
-        repo_type: Option<String>,
-        url: String,
-        #[serde(default)]
-        directory: Option<String>,
-    },
-}
-
-pub fn resolve_npm(agent: &ureq::Agent, name: &str, version: Option<&str>) -> Result<NpmResolved> {
-    let encoded_name = encode_npm_package_name(name);
-    let version = match version {
-        Some(version) => version.to_string(),
-        None => latest_npm_version(agent, name, &encoded_name)?,
-    };
-    let url = format!("https://registry.npmjs.org/{encoded_name}/{version}");
-    let body: NpmVersion = get_json(agent, &url)?;
-    let git_head = body.git_head.ok_or_else(|| {
-        GrepoError::Registry(format!(
-            "npm:{name}@{version} does not publish gitHead metadata; grepo cannot map this \
-release to an exact source commit automatically. Use --url for the upstream repo if you want a raw git source"
-        ))
-    })?;
-    let commit = normalise_commit(&git_head).ok_or_else(|| {
-        GrepoError::Registry(format!(
-            "npm:{name}@{version} gitHead is not a commit SHA: {git_head}"
-        ))
-    })?;
-    let repository = body.repository.ok_or_else(|| {
-        GrepoError::Registry(format!(
-            "npm:{name}@{version} does not publish repository metadata; use --url for the upstream repo if you want a raw git source"
-        ))
-    })?;
-    let (raw_url, subdir) = match repository {
-        NpmRepository::String(url) => (url, None),
-        NpmRepository::Object {
-            repo_type,
-            url,
-            directory,
-        } => {
-            if let Some(repo_type) = repo_type
-                && repo_type != "git"
-            {
-                return Err(GrepoError::Registry(format!(
-                    "npm:{name}@{version} repository type {repo_type:?} is not supported; use --url for the upstream repo"
-                )));
-            }
-            (url, directory)
-        }
-    };
-    let git_url = normalise_git_url(&raw_url).map_err(|error| {
-        GrepoError::Registry(format!(
-            "npm:{name}@{version} repository {raw_url:?} is not a supported git source: {error}. Use --url for the upstream repo"
-        ))
-    })?;
-    Ok(NpmResolved {
-        url: git_url,
-        subdir,
-        commit,
-        version: version.to_string(),
-    })
-}
-
-fn latest_npm_version(agent: &ureq::Agent, name: &str, encoded_name: &str) -> Result<String> {
-    let url = format!("https://registry.npmjs.org/{encoded_name}");
-    let body: NpmPackage = get_json(agent, &url)?;
-    body.dist_tags
-        .latest
-        .ok_or_else(|| GrepoError::Registry(format!("npm:{name} has no dist-tags.latest version")))
-}
-
-fn encode_npm_package_name(name: &str) -> String {
-    if let Some(rest) = name.strip_prefix('@')
-        && let Some(slash_idx) = rest.find('/')
-    {
-        let (scope, pkg) = rest.split_at(slash_idx);
-        return format!("@{scope}%2F{}", &pkg[1..]);
-    }
-    name.to_string()
-}
-
-fn normalise_git_url(raw: &str) -> Result<String> {
-    let url = raw.trim();
-    let url = strip_fragment(url);
-
-    if let Some(repo) = url.strip_prefix("github:") {
-        return expand_host_shorthand("https://github.com", repo);
-    }
-    if let Some(repo) = url.strip_prefix("gitlab:") {
-        return expand_host_shorthand("https://gitlab.com", repo);
-    }
-    if let Some(repo) = url.strip_prefix("bitbucket:") {
-        return expand_host_shorthand("https://bitbucket.org", repo);
-    }
-    if url.starts_with("gist:") {
-        return Err(GrepoError::InvalidSource(
-            "gist repositories are not supported".into(),
-        ));
-    }
-    if looks_like_github_shorthand(url) {
-        return expand_host_shorthand("https://github.com", url);
-    }
-
-    let url = url.strip_prefix("git+").unwrap_or(url);
-    if is_supported_git_url(url) {
-        return Ok(ensure_git_suffix(url));
-    }
-
-    Err(GrepoError::InvalidSource(format!(
-        "unsupported repository URL {raw:?}"
-    )))
-}
-
-fn strip_fragment(url: &str) -> &str {
-    url.split('#').next().unwrap_or(url)
-}
-
-fn looks_like_github_shorthand(value: &str) -> bool {
-    let Some((owner, repo)) = value.split_once('/') else {
-        return false;
-    };
-    !owner.is_empty()
-        && !repo.is_empty()
-        && !value.contains("://")
-        && !value.contains('@')
-        && !owner.contains(':')
-        && !repo.contains('/')
-}
-
-fn expand_host_shorthand(base: &str, repo: &str) -> Result<String> {
-    if !looks_like_github_shorthand(repo) {
-        return Err(GrepoError::InvalidSource(format!(
-            "unsupported repository shorthand {repo:?}"
-        )));
-    }
-    Ok(ensure_git_suffix(&format!("{base}/{repo}")))
-}
-
-fn is_supported_git_url(url: &str) -> bool {
-    url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("ssh://")
-        || url.starts_with("git://")
-        || url.starts_with("git@")
-}
-
-fn ensure_git_suffix(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with(".git") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}.git")
-    }
-}
-
-fn normalise_commit(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.len() != 40 && trimmed.len() != 64 {
-        return None;
-    }
-    if !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(trimmed.to_ascii_lowercase())
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoRegistryResponse {
-    version: CargoVersion,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoCrateRegistryResponse {
-    #[serde(rename = "crate")]
-    krate: CargoRegistryCrate,
-    versions: Vec<CargoVersion>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoRegistryCrate {
-    #[serde(rename = "max_stable_version")]
-    max_stable_version: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoVersion {
-    num: String,
-    #[serde(rename = "dl_path")]
-    dl_path: String,
-    #[serde(rename = "checksum")]
-    checksum: String,
-    #[serde(default)]
-    yanked: bool,
-}
-
-pub fn resolve_cargo(
-    agent: &ureq::Agent,
-    name: &str,
-    version: Option<&str>,
-) -> Result<CargoResolved> {
-    match version {
-        Some(version) => resolve_exact_cargo(agent, name, version),
-        None => resolve_latest_cargo(agent, name),
-    }
-}
-
-fn resolve_exact_cargo(agent: &ureq::Agent, name: &str, version: &str) -> Result<CargoResolved> {
-    let url = format!("https://crates.io/api/v1/crates/{name}/{version}");
-    let body: CargoRegistryResponse = get_json(agent, &url)?;
-    cargo_resolved_from_version(name, &body.version)
-}
-
-fn resolve_latest_cargo(agent: &ureq::Agent, name: &str) -> Result<CargoResolved> {
-    let url = format!("https://crates.io/api/v1/crates/{name}");
-    let body: CargoCrateRegistryResponse = get_json(agent, &url)?;
-    let version = select_latest_cargo_version(&body).ok_or_else(|| {
-        GrepoError::Registry(format!("cargo:{name} has no stable non-yanked release"))
-    })?;
-    cargo_resolved_from_version(name, version)
-}
-
-fn select_latest_cargo_version(body: &CargoCrateRegistryResponse) -> Option<&CargoVersion> {
-    if !body.krate.max_stable_version.is_empty()
-        && let Some(version) = body
-            .versions
-            .iter()
-            .find(|version| version.num == body.krate.max_stable_version && !version.yanked)
-    {
-        return Some(version);
-    }
-    body.versions.iter().find(|version| !version.yanked)
-}
-
-fn cargo_resolved_from_version(name: &str, version: &CargoVersion) -> Result<CargoResolved> {
-    let download_url = if version.dl_path.starts_with("http") {
-        version.dl_path.clone()
-    } else {
-        format!("https://crates.io{}", version.dl_path)
-    };
-    let sha256 = version.checksum.to_ascii_lowercase();
-    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(GrepoError::Registry(format!(
-            "cargo:{name}@{} returned invalid checksum: {}",
-            version.num, version.checksum
-        )));
-    }
-    Ok(CargoResolved {
-        version: version.num.clone(),
-        download_url,
-        sha256,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,7 +187,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Npm {
-                spec: "react".into(),
                 name: "react".into(),
                 version: None,
             }
@@ -483,7 +199,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Npm {
-                spec: "react@18.2.0".into(),
                 name: "react".into(),
                 version: Some("18.2.0".into()),
             }
@@ -496,7 +211,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Npm {
-                spec: "@types/node@20.10.0".into(),
                 name: "@types/node".into(),
                 version: Some("20.10.0".into()),
             }
@@ -509,7 +223,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Npm {
-                spec: "@types/node".into(),
                 name: "@types/node".into(),
                 version: None,
             }
@@ -528,7 +241,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Cargo {
-                spec: "serde".into(),
                 name: "serde".into(),
                 version: None,
             }
@@ -541,7 +253,6 @@ mod tests {
         assert_eq!(
             spec,
             SourceSpec::Cargo {
-                spec: "serde@1.0.197".into(),
                 name: "serde".into(),
                 version: Some("1.0.197".into()),
             }
@@ -552,107 +263,5 @@ mod tests {
     fn parse_lock_source_roundtrip() {
         let spec = SourceSpec::parse_lock_source("npm:react@18.2.0").unwrap();
         assert_eq!(spec.to_source_string().as_deref(), Some("npm:react@18.2.0"));
-    }
-
-    #[test]
-    fn encode_npm_scoped_name_url_encodes_slash() {
-        assert_eq!(encode_npm_package_name("react"), "react");
-        assert_eq!(encode_npm_package_name("@types/node"), "@types%2Fnode");
-    }
-
-    #[test]
-    fn normalise_git_url_strips_git_plus_and_keeps_suffix() {
-        assert_eq!(
-            normalise_git_url("git+https://github.com/facebook/react.git").unwrap(),
-            "https://github.com/facebook/react.git"
-        );
-        assert_eq!(
-            normalise_git_url("https://github.com/facebook/react").unwrap(),
-            "https://github.com/facebook/react.git"
-        );
-    }
-
-    #[test]
-    fn normalise_git_url_supports_github_shorthand() {
-        assert_eq!(
-            normalise_git_url("colinhacks/zod").unwrap(),
-            "https://github.com/colinhacks/zod.git"
-        );
-        assert_eq!(
-            normalise_git_url("github:colinhacks/zod").unwrap(),
-            "https://github.com/colinhacks/zod.git"
-        );
-    }
-
-    #[test]
-    fn normalise_git_url_supports_other_host_shorthands() {
-        assert_eq!(
-            normalise_git_url("gitlab:honojs/middleware").unwrap(),
-            "https://gitlab.com/honojs/middleware.git"
-        );
-        assert_eq!(
-            normalise_git_url("bitbucket:user/repo").unwrap(),
-            "https://bitbucket.org/user/repo.git"
-        );
-    }
-
-    #[test]
-    fn normalise_git_url_strips_fragments_and_trailing_slash() {
-        assert_eq!(
-            normalise_git_url("https://github.com/npm/cli/#readme").unwrap(),
-            "https://github.com/npm/cli.git"
-        );
-    }
-
-    #[test]
-    fn normalise_git_url_rejects_unsupported_shorthands() {
-        assert!(normalise_git_url("gist:11081aaa281").is_err());
-        assert!(normalise_git_url("not a repo").is_err());
-    }
-
-    #[test]
-    fn latest_npm_version_uses_dist_tag() {
-        let body: NpmPackage = serde_json::from_str(
-            r#"{
-                "dist-tags": {
-                    "latest": "19.2.5",
-                    "next": "19.3.0-canary"
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(body.dist_tags.latest.as_deref(), Some("19.2.5"));
-    }
-
-    #[test]
-    fn select_latest_cargo_version_prefers_max_stable_version() {
-        let body: CargoCrateRegistryResponse = serde_json::from_str(
-            r#"{
-                "crate": {
-                    "max_stable_version": "1.0.228"
-                },
-                "versions": [
-                    {
-                        "num": "1.0.228",
-                        "dl_path": "/api/v1/crates/serde/1.0.228/download",
-                        "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
-                        "yanked": false
-                    },
-                    {
-                        "num": "1.0.229-alpha.1",
-                        "dl_path": "/api/v1/crates/serde/1.0.229-alpha.1/download",
-                        "checksum": "80ece43fc6fbed4eb5392ab50c07334d3e577cbf40997ee896fe7af40bba4245",
-                        "yanked": false
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            select_latest_cargo_version(&body).map(|version| version.num.as_str()),
-            Some("1.0.228")
-        );
     }
 }
