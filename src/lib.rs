@@ -5,7 +5,9 @@ mod git;
 mod manifest;
 mod mutation_lock;
 mod output;
+mod registry;
 mod store;
+mod tarball;
 mod util;
 
 pub use app::main_entry;

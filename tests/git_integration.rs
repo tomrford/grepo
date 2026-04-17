@@ -50,7 +50,7 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
     assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
@@ -143,7 +143,7 @@ fn add_does_not_write_lockfile_when_alias_path_collides() {
         cache_root,
         state_root,
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap_err();
     assert_eq!(
@@ -179,7 +179,7 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote_a.to_str().unwrap()],
+        &["add", "docs", "--url", remote_a.to_str().unwrap()],
     )
     .unwrap();
 
@@ -188,7 +188,7 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote_b.to_str().unwrap()],
+        &["add", "docs", "--url", remote_b.to_str().unwrap()],
     )
     .unwrap_err();
     assert_eq!(
@@ -210,7 +210,13 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
         cache_root,
         state_root,
         "git".into(),
-        &["add", "docs", remote_b.to_str().unwrap(), "--force"],
+        &[
+            "add",
+            "docs",
+            "--url",
+            remote_b.to_str().unwrap(),
+            "--force",
+        ],
     )
     .unwrap();
     assert_eq!(report.exit_code(), ExitCode::SUCCESS);
@@ -247,7 +253,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "a", remote_a.to_str().unwrap()],
+        &["add", "a", "--url", remote_a.to_str().unwrap()],
     )
     .unwrap();
     run_for_test(
@@ -255,7 +261,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "b", remote_b.to_str().unwrap()],
+        &["add", "b", "--url", remote_b.to_str().unwrap()],
     )
     .unwrap();
 
@@ -268,6 +274,8 @@ fn update_specific_alias_changes_only_targeted_entry() {
             "user.name=grepo",
             "-c",
             "user.email=grepo@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-m",
             "update",
@@ -327,7 +335,7 @@ fn sync_warns_on_path_collision_and_continues_other_aliases() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "a", remote_a.to_str().unwrap()],
+        &["add", "a", "--url", remote_a.to_str().unwrap()],
     )
     .unwrap();
     run_for_test(
@@ -335,7 +343,7 @@ fn sync_warns_on_path_collision_and_continues_other_aliases() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "b", remote_b.to_str().unwrap()],
+        &["add", "b", "--url", remote_b.to_str().unwrap()],
     )
     .unwrap();
 
@@ -385,7 +393,7 @@ fn gc_prunes_unreachable_snapshots_and_remotes_from_rooted_lockfiles() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
 
@@ -439,7 +447,7 @@ fn gc_verbose_includes_summary_and_paths() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
 
@@ -496,7 +504,7 @@ fn gc_warns_and_skips_unreadable_root_lockfiles() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
 
@@ -524,8 +532,8 @@ commit = "deadbeef"
     assert_eq!(report.exit_code(), ExitCode::from(1));
     assert_eq!(report.stderr().len(), 1);
     assert!(report.stderr()[0].starts_with("warning: skipped rooted lockfile "));
-    assert!(report.stderr()[0].contains(".lock: invalid grepo/.lock TOML:"));
-    assert!(report.stderr()[0].contains("missing field `mode`"));
+    assert!(report.stderr()[0].contains("invalid grepo/.lock entry"));
+    assert!(report.stderr()[0].contains("missing mode"));
 }
 
 #[test]
@@ -593,7 +601,7 @@ fn remove_deletes_dangling_managed_symlink() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
 
@@ -673,7 +681,7 @@ fn add_rejects_leading_dot_aliases() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", ".lock", remote.to_str().unwrap()],
+        &["add", ".lock", "--url", remote.to_str().unwrap()],
     )
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid alias: .lock");
@@ -700,6 +708,7 @@ fn add_rejects_refs_that_start_with_dash() {
         &[
             "add",
             "docs",
+            "--url",
             remote.to_str().unwrap(),
             "--ref=--upload-pack=/bin/echo",
         ],
@@ -726,7 +735,13 @@ fn add_rejects_non_oid_commit_values() {
         cache_root,
         state_root,
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap(), "--commit=--orphan"],
+        &[
+            "add",
+            "docs",
+            "--url",
+            remote.to_str().unwrap(),
+            "--commit=--orphan",
+        ],
     )
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid commit: --orphan");
@@ -752,7 +767,14 @@ fn add_ref_named_default_is_not_ambiguous_in_lockfile() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap(), "--ref", "default"],
+        &[
+            "add",
+            "docs",
+            "--url",
+            remote.to_str().unwrap(),
+            "--ref",
+            "default",
+        ],
     )
     .unwrap();
     assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
@@ -811,7 +833,7 @@ fn remove_validates_full_alias_list_before_removing_anything() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "a", remote_a.to_str().unwrap()],
+        &["add", "a", "--url", remote_a.to_str().unwrap()],
     )
     .unwrap();
     run_for_test(
@@ -819,7 +841,7 @@ fn remove_validates_full_alias_list_before_removing_anything() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "b", remote_b.to_str().unwrap()],
+        &["add", "b", "--url", remote_b.to_str().unwrap()],
     )
     .unwrap();
 
@@ -981,7 +1003,7 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "a", remote_a.to_str().unwrap()],
+        &["add", "a", "--url", remote_a.to_str().unwrap()],
     )
     .unwrap();
     run_for_test(
@@ -989,7 +1011,7 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "b", remote_b.to_str().unwrap()],
+        &["add", "b", "--url", remote_b.to_str().unwrap()],
     )
     .unwrap();
 
@@ -1006,6 +1028,8 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
             "user.name=grepo",
             "-c",
             "user.email=grepo@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-m",
             "update-a",
@@ -1022,6 +1046,8 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
             "user.name=grepo",
             "-c",
             "user.email=grepo@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-m",
             "update-b",
@@ -1086,7 +1112,14 @@ fn update_explicit_exact_pin_reports_skip_instead_of_false_success() {
         cache_root,
         state_root,
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap(), "--commit", &commit],
+        &[
+            "add",
+            "docs",
+            "--url",
+            remote.to_str().unwrap(),
+            "--commit",
+            &commit,
+        ],
     )
     .unwrap();
 
@@ -1125,7 +1158,7 @@ fn add_repairs_half_initialized_remote_cache() {
         cache_root.clone(),
         state_root,
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
     assert_eq!(report.exit_code(), ExitCode::SUCCESS);
@@ -1187,7 +1220,7 @@ fn add_uses_owner_only_store_permissions() {
         cache_root.clone(),
         state_root.clone(),
         "git".into(),
-        &["add", "docs", remote.to_str().unwrap()],
+        &["add", "docs", "--url", remote.to_str().unwrap()],
     )
     .unwrap();
 
@@ -1200,7 +1233,16 @@ fn add_uses_owner_only_store_permissions() {
 }
 
 fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str) {
-    git(None, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        None,
+        &[
+            "-c",
+            "init.defaultBranch=main",
+            "init",
+            "--bare",
+            remote.to_str().unwrap(),
+        ],
+    );
     git(
         None,
         &["clone", remote.to_str().unwrap(), seed.to_str().unwrap()],
@@ -1215,6 +1257,8 @@ fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str)
             "user.name=grepo",
             "-c",
             "user.email=grepo@example.com",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-m",
             "seed",

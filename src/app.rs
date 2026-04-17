@@ -5,12 +5,15 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command as CliCommand, GcArgs, RemoveArgs, UpdateArgs};
+use crate::cli::{
+    AddArgs as CliAddArgs, Cli, Command as CliCommand, GcArgs, RemoveArgs, UpdateArgs,
+};
 use crate::error::{GrepoError, Result};
-use crate::git::{Git, ResolveSpec, validate_commit_oid, validate_ref_name};
-use crate::manifest::{LockEntry, LockMode, Lockfile};
+use crate::git::{Git, ResolveSpec, validate_commit_oid, validate_ref_name, validate_subdir};
+use crate::manifest::{GitLockEntry, LockEntry, LockMode, Lockfile, TarballLockEntry};
 use crate::mutation_lock::MutationLock;
 use crate::output::RunReport;
+use crate::registry::{self, CargoResolved, NpmResolved, SourceSpec};
 use crate::store::{
     GcReport, Store, is_managed_symlink_name, read_dir_paths, remove_managed_symlink,
     replace_symlink, symlink_metadata_if_exists,
@@ -48,6 +51,7 @@ fn run_env(args: Vec<OsString>) -> Result<RunReport> {
         cache_root: cache_root()?,
         state_root: state_root()?,
         git: Git::new("git"),
+        http_agent: registry::http_agent(),
     };
     command.run(&context)
 }
@@ -58,6 +62,7 @@ struct AppContext {
     cache_root: PathBuf,
     state_root: PathBuf,
     git: Git,
+    http_agent: ureq::Agent,
 }
 
 impl AppContext {
@@ -121,7 +126,7 @@ impl ProjectRoot {
 #[derive(Clone, Debug)]
 enum Command {
     Init,
-    Add(AddArgs),
+    Add(AddCommand),
     List,
     Remove { aliases: Vec<String> },
     Sync,
@@ -131,12 +136,26 @@ enum Command {
 }
 
 #[derive(Clone, Debug)]
-struct AddArgs {
+struct AddCommand {
     alias: String,
-    url: String,
-    ref_name: Option<String>,
-    commit: Option<String>,
+    source: AddSource,
+    subdir: Option<String>,
     force: bool,
+}
+
+#[derive(Clone, Debug)]
+enum AddSource {
+    Url {
+        url: String,
+        ref_name: Option<String>,
+        commit: Option<String>,
+    },
+    Npm {
+        spec: SourceSpec,
+    },
+    Cargo {
+        spec: SourceSpec,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -151,13 +170,7 @@ impl TryFrom<CliCommand> for Command {
     fn try_from(value: CliCommand) -> Result<Self> {
         match value {
             CliCommand::Init => Ok(Self::Init),
-            CliCommand::Add(args) => Ok(Self::Add(AddArgs {
-                alias: validate_alias(args.alias)?,
-                url: args.url,
-                ref_name: validate_optional_ref(args.ref_name)?,
-                commit: validate_optional_commit(args.commit)?,
-                force: args.force,
-            })),
+            CliCommand::Add(args) => Ok(Self::Add(parse_add(args)?)),
             CliCommand::List => Ok(Self::List),
             CliCommand::Remove(RemoveArgs { aliases }) => Ok(Self::Remove {
                 aliases: validate_aliases(aliases)?,
@@ -170,6 +183,41 @@ impl TryFrom<CliCommand> for Command {
             CliCommand::Skill => Ok(Self::Skill),
         }
     }
+}
+
+fn parse_add(args: CliAddArgs) -> Result<AddCommand> {
+    let alias = validate_alias(args.alias)?;
+    let subdir = match args.subdir {
+        Some(value) => {
+            validate_subdir(&value)?;
+            Some(value)
+        }
+        None => None,
+    };
+    let source = if let Some(url) = args.url {
+        AddSource::Url {
+            url,
+            ref_name: validate_optional_ref(args.ref_name)?,
+            commit: validate_optional_commit(args.commit)?,
+        }
+    } else if let Some(spec) = args.npm {
+        AddSource::Npm {
+            spec: SourceSpec::parse_npm(&spec)?,
+        }
+    } else if let Some(spec) = args.cargo_pkg {
+        AddSource::Cargo {
+            spec: SourceSpec::parse_cargo(&spec)?,
+        }
+    } else {
+        // clap's ArgGroup makes this unreachable.
+        return Err(GrepoError::InvalidSource("no source provided".into()));
+    };
+    Ok(AddCommand {
+        alias,
+        source,
+        subdir,
+        force: args.force,
+    })
 }
 
 impl Command {
@@ -213,7 +261,7 @@ fn init(context: &AppContext) -> Result<RunReport> {
     Ok(report)
 }
 
-fn add(context: &AppContext, args: AddArgs) -> Result<RunReport> {
+fn add(context: &AppContext, args: AddCommand) -> Result<RunReport> {
     let root = match ProjectRoot::discover(&context.cwd) {
         Some(root) => root,
         None => ProjectRoot::create_at(&context.cwd)?,
@@ -227,16 +275,8 @@ fn add(context: &AppContext, args: AddArgs) -> Result<RunReport> {
     if existing.is_some() && !args.force {
         return Err(GrepoError::AliasExists(args.alias));
     }
-    let mut entry = LockEntry::new(args.alias.clone(), args.url);
-    if let Some(ref_name) = args.ref_name {
-        entry.mode = LockMode::Ref { ref_name };
-    } else if let Some(commit) = args.commit {
-        entry.commit = Some(commit);
-        entry.mode = LockMode::Exact;
-    } else {
-        entry.mode = LockMode::Default;
-    }
 
+    let entry = build_entry(&args)?;
     let realized = realize_entry(context, &store, &entry, false)?;
     apply_realized_alias(&root, &mut lockfile, existing.as_ref(), &realized)?;
     lockfile.write(&root.lock_path)?;
@@ -250,10 +290,62 @@ fn add(context: &AppContext, args: AddArgs) -> Result<RunReport> {
     };
     report.stdout_line(format!(
         "{verb} {} -> {}",
-        realized.entry.alias,
+        realized.entry.alias(),
         realized.snapshot_path.display()
     ));
     Ok(report)
+}
+
+fn build_entry(args: &AddCommand) -> Result<LockEntry> {
+    match &args.source {
+        AddSource::Url {
+            url,
+            ref_name,
+            commit,
+        } => {
+            let mode = if let Some(ref_name) = ref_name {
+                LockMode::Ref {
+                    ref_name: ref_name.clone(),
+                }
+            } else if commit.is_some() {
+                LockMode::Exact
+            } else {
+                LockMode::Default
+            };
+            Ok(LockEntry::Git(GitLockEntry {
+                alias: args.alias.clone(),
+                source: None,
+                url: url.clone(),
+                subdir: args.subdir.clone(),
+                mode,
+                commit: commit.clone(),
+            }))
+        }
+        AddSource::Npm { spec } => {
+            let source = spec
+                .to_source_string()
+                .expect("npm spec always encodes to source string");
+            Ok(LockEntry::Git(GitLockEntry {
+                alias: args.alias.clone(),
+                source: Some(source),
+                url: String::new(), // resolved during realize
+                subdir: args.subdir.clone(),
+                mode: source_lock_mode(spec),
+                commit: None,
+            }))
+        }
+        AddSource::Cargo { spec } => {
+            let source = spec
+                .to_source_string()
+                .expect("cargo spec always encodes to source string");
+            Ok(LockEntry::Tarball(TarballLockEntry {
+                alias: args.alias.clone(),
+                source,
+                url: String::new(),
+                sha256: String::new(),
+            }))
+        }
+    }
 }
 
 fn list(context: &AppContext) -> Result<RunReport> {
@@ -317,7 +409,7 @@ fn sync(context: &AppContext) -> Result<RunReport> {
                         }
                         report.stdout_line(format!(
                             "synced {} -> {}",
-                            realized.entry.alias,
+                            realized.entry.alias(),
                             realized.snapshot_path.display()
                         ));
                     }
@@ -367,7 +459,7 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
                         }
                         report.stdout_line(format!(
                             "updated {} -> {}",
-                            realized.entry.alias,
+                            realized.entry.alias(),
                             realized.snapshot_path.display()
                         ));
                     }
@@ -403,10 +495,38 @@ fn realize_entry(
     entry: &LockEntry,
     refresh_tracking: bool,
 ) -> Result<RealizedAlias> {
+    match entry {
+        LockEntry::Git(git_entry) => realize_git_entry(context, store, git_entry, refresh_tracking),
+        LockEntry::Tarball(tarball_entry) => {
+            realize_tarball_entry(context, store, tarball_entry, refresh_tracking)
+        }
+    }
+}
+
+fn realize_git_entry(
+    context: &AppContext,
+    store: &Store,
+    entry: &GitLockEntry,
+    refresh_tracking: bool,
+) -> Result<RealizedAlias> {
     validate_git_entry(entry)?;
     let mut updated = entry.clone();
-    if refresh_tracking || updated.commit.is_none() {
-        if updated.can_update() {
+
+    // Re-resolve from the registry when we're refreshing a package-sourced entry
+    // or when a package-sourced entry has no URL recorded yet (fresh `add`).
+    let needs_package_resolve = updated.source.is_some()
+        && (refresh_tracking || updated.url.is_empty() || updated.commit.is_none());
+    if needs_package_resolve {
+        let source = updated.source.clone().unwrap_or_default();
+        let resolved = resolve_npm_source(&context.http_agent, &source)?;
+        updated.url = resolved.url;
+        updated.commit = Some(resolved.commit);
+        if updated.subdir.is_none() {
+            updated.subdir = resolved.subdir;
+        }
+        updated.mode = lock_mode_for_source(&source)?;
+    } else if refresh_tracking || updated.commit.is_none() {
+        if !matches!(updated.mode, LockMode::Exact) {
             updated.commit = Some(resolve_tracking_commit(context, store, &updated)?);
         } else if updated.commit.is_none() {
             return Err(GrepoError::MissingCommit(updated.alias.clone()));
@@ -417,17 +537,69 @@ fn realize_entry(
         .commit
         .as_deref()
         .ok_or_else(|| GrepoError::MissingCommit(updated.alias.clone()))?;
-    let snapshot_path = store.ensure_snapshot_for_commit(&context.git, &updated.url, commit)?;
+    let snapshot_path = store.ensure_snapshot_for_commit(
+        &context.git,
+        &updated.url,
+        commit,
+        updated.subdir.as_deref(),
+    )?;
     Ok(RealizedAlias {
-        entry: updated,
+        entry: LockEntry::Git(updated),
         snapshot_path,
     })
+}
+
+fn realize_tarball_entry(
+    context: &AppContext,
+    store: &Store,
+    entry: &TarballLockEntry,
+    refresh_tracking: bool,
+) -> Result<RealizedAlias> {
+    let mut updated = entry.clone();
+    let needs_resolve = refresh_tracking || updated.url.is_empty() || updated.sha256.is_empty();
+    if needs_resolve {
+        let resolved = resolve_cargo_source(&context.http_agent, &updated.source)?;
+        updated.url = resolved.download_url;
+        updated.sha256 = resolved.sha256;
+    }
+    if updated.sha256.is_empty() || updated.url.is_empty() {
+        return Err(GrepoError::Registry(format!(
+            "tarball entry {} is missing url or sha256",
+            updated.alias
+        )));
+    }
+    let snapshot_path =
+        store.ensure_snapshot_for_tarball(&context.http_agent, &updated.url, &updated.sha256)?;
+    Ok(RealizedAlias {
+        entry: LockEntry::Tarball(updated),
+        snapshot_path,
+    })
+}
+
+fn resolve_npm_source(agent: &ureq::Agent, source: &str) -> Result<NpmResolved> {
+    let spec = SourceSpec::parse_lock_source(source)?;
+    let SourceSpec::Npm { name, version, .. } = spec else {
+        return Err(GrepoError::InvalidSource(format!(
+            "expected npm source, got \"{source}\""
+        )));
+    };
+    registry::resolve_npm(agent, &name, version.as_deref())
+}
+
+fn resolve_cargo_source(agent: &ureq::Agent, source: &str) -> Result<CargoResolved> {
+    let spec = SourceSpec::parse_lock_source(source)?;
+    let SourceSpec::Cargo { name, version, .. } = spec else {
+        return Err(GrepoError::InvalidSource(format!(
+            "expected cargo source, got \"{source}\""
+        )));
+    };
+    registry::resolve_cargo(agent, &name, version.as_deref())
 }
 
 fn resolve_tracking_commit(
     context: &AppContext,
     store: &Store,
-    entry: &LockEntry,
+    entry: &GitLockEntry,
 ) -> Result<String> {
     let spec = match &entry.mode {
         LockMode::Default => ResolveSpec::DefaultBranch,
@@ -498,7 +670,7 @@ fn apply_realized_alias(
     realized: &RealizedAlias,
 ) -> Result<()> {
     replace_symlink(
-        &root.grepo_dir.join(&realized.entry.alias),
+        &root.grepo_dir.join(realized.entry.alias()),
         &realized.snapshot_path,
     )?;
     if previous != Some(&realized.entry) {
@@ -510,24 +682,42 @@ fn apply_realized_alias(
 fn render_list(lockfile: &Lockfile) -> String {
     let mut sections = Vec::new();
     for entry in lockfile.entries() {
-        let mut lines = vec![
-            format!("[repos.{}]", entry.alias),
-            format!("url = {:?}", entry.url),
-        ];
-        match &entry.mode {
-            LockMode::Default => lines.push("mode = \"default\"".to_string()),
-            LockMode::Ref { ref_name } => {
-                lines.push("mode = \"ref\"".to_string());
-                lines.push(format!("ref = {:?}", ref_name));
-            }
-            LockMode::Exact => {
-                lines.push("mode = \"exact\"".to_string());
-                if let Some(commit) = &entry.commit {
-                    lines.push(format!("commit = {:?}", commit));
+        match entry {
+            LockEntry::Git(git_entry) => {
+                let mut lines = vec![format!("[repos.{}]", git_entry.alias)];
+                if let Some(source) = &git_entry.source {
+                    lines.push(format!("source = {source:?}"));
                 }
+                lines.push(format!("url = {:?}", git_entry.url));
+                if let Some(subdir) = &git_entry.subdir {
+                    lines.push(format!("subdir = {subdir:?}"));
+                }
+                match &git_entry.mode {
+                    LockMode::Default => lines.push("mode = \"default\"".to_string()),
+                    LockMode::Ref { ref_name } => {
+                        lines.push("mode = \"ref\"".to_string());
+                        lines.push(format!("ref = {:?}", ref_name));
+                    }
+                    LockMode::Exact => {
+                        lines.push("mode = \"exact\"".to_string());
+                        if let Some(commit) = &git_entry.commit {
+                            lines.push(format!("commit = {:?}", commit));
+                        }
+                    }
+                }
+                sections.push(lines.join("\n"));
+            }
+            LockEntry::Tarball(tarball_entry) => {
+                let lines = [
+                    format!("[repos.{}]", tarball_entry.alias),
+                    "backend = \"tarball\"".to_string(),
+                    format!("source = {:?}", tarball_entry.source),
+                    format!("url = {:?}", tarball_entry.url),
+                    format!("sha256 = {:?}", tarball_entry.sha256),
+                ];
+                sections.push(lines.join("\n"));
             }
         }
-        sections.push(lines.join("\n"));
     }
     sections.join("\n\n")
 }
@@ -577,7 +767,20 @@ fn validate_optional_commit(commit: Option<String>) -> Result<Option<String>> {
         .transpose()
 }
 
-fn validate_git_entry(entry: &LockEntry) -> Result<()> {
+fn source_lock_mode(spec: &SourceSpec) -> LockMode {
+    match spec {
+        SourceSpec::Npm { version, .. } if version.is_none() => LockMode::Default,
+        SourceSpec::Npm { .. } => LockMode::Exact,
+        SourceSpec::Cargo { .. } => LockMode::Exact,
+    }
+}
+
+fn lock_mode_for_source(source: &str) -> Result<LockMode> {
+    let spec = SourceSpec::parse_lock_source(source)?;
+    Ok(source_lock_mode(&spec))
+}
+
+fn validate_git_entry(entry: &GitLockEntry) -> Result<()> {
     match &entry.mode {
         LockMode::Default => {}
         LockMode::Ref { ref_name } => validate_ref_name(ref_name)?,
@@ -585,6 +788,9 @@ fn validate_git_entry(entry: &LockEntry) -> Result<()> {
     }
     if let Some(commit) = &entry.commit {
         validate_commit_oid(commit)?;
+    }
+    if let Some(subdir) = &entry.subdir {
+        validate_subdir(subdir)?;
     }
     Ok(())
 }
@@ -608,6 +814,62 @@ pub(crate) fn run_for_test(
         cache_root,
         state_root,
         git: Git::new(git_program),
+        http_agent: registry::http_agent(),
     };
     command.run(&context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_entry_tracks_plain_npm_specs() {
+        let entry = build_entry(&AddCommand {
+            alias: "react".into(),
+            source: AddSource::Npm {
+                spec: SourceSpec::parse_npm("react").unwrap(),
+            },
+            subdir: None,
+            force: false,
+        })
+        .unwrap();
+
+        let LockEntry::Git(entry) = entry else {
+            panic!();
+        };
+        assert_eq!(entry.source.as_deref(), Some("npm:react"));
+        assert!(matches!(entry.mode, LockMode::Default));
+    }
+
+    #[test]
+    fn build_entry_pins_versioned_npm_specs() {
+        let entry = build_entry(&AddCommand {
+            alias: "react".into(),
+            source: AddSource::Npm {
+                spec: SourceSpec::parse_npm("react@19.2.5").unwrap(),
+            },
+            subdir: None,
+            force: false,
+        })
+        .unwrap();
+
+        let LockEntry::Git(entry) = entry else {
+            panic!();
+        };
+        assert_eq!(entry.source.as_deref(), Some("npm:react@19.2.5"));
+        assert!(matches!(entry.mode, LockMode::Exact));
+    }
+
+    #[test]
+    fn lock_mode_for_source_tracks_versionless_npm_sources() {
+        assert!(matches!(
+            lock_mode_for_source("npm:react").unwrap(),
+            LockMode::Default
+        ));
+        assert!(matches!(
+            lock_mode_for_source("npm:react@19.2.5").unwrap(),
+            LockMode::Exact
+        ));
+    }
 }
