@@ -66,8 +66,8 @@ Update semantics for package sources: a `source` string without a version (e.g. 
 - **`grepo init`** — create `grepo/` and an empty `grepo/.lock` in the current directory.
 - **`grepo add <alias> <source-flag> [options]`** — register an alias and materialize immediately. Exactly one source flag is required:
   - `--url <git-url>` — raw git URL. Pair with `--ref <branch-or-tag>` (tracking ref) or `--commit <sha>` (exact pin). `--ref` and `--commit` are mutually exclusive and only valid with `--url`.
-  - `--npm <spec>` — npm package: `zod`, `chalk@5.3.0`, `@trpc/server@11.6.0`. Only exact versions; ranges / dist-tags are rejected. Packages that don't publish `gitHead` (e.g. React, Babel) cannot be resolved this way — fall back to `--url` against the upstream repo.
-  - `--cargo <spec>` — cargo crate: `serde`, `serde@1.0.197`, `clap@4.6.1`. Only exact versions.
+  - `--npm <spec>` — npm package: `zod`, `chalk@5.3.0`, `@trpc/server@11.6.0`. Use a concrete registry version when you include one; ranges / dist-tags are rejected. Packages that don't publish `gitHead` (e.g. React, Babel) cannot be resolved this way — fall back to `--url` against the upstream repo.
+  - `--cargo <spec>` — cargo crate: `serde`, `serde@1.0.197`, `clap@4.6.1`. Use a concrete registry version when you include one.
   - `--subdir <path>` — snapshot only this subdirectory of the resolved source. Not valid with `--cargo`.
   - `--force` — replace an existing alias.
 - **`grepo list`** — print configured aliases, their source (if any), URL, subdir, and how they track upstream.
@@ -97,9 +97,9 @@ grepo gc                # occasionally, to reclaim disk
 
 - `grepo/<alias>` is read-only — writes fail with `EACCES`. This is intentional.
 - No `.git` inside the snapshot. For git-backed entries, use the upstream URL from `.lock` for history or blame. Cargo tarball entries have no upstream git history available through grepo.
-- `grepo add` now requires a source flag (`--url`, `--npm`, or `--cargo`); there is no positional URL argument.
+- `grepo add` requires a source flag (`--url`, `--npm`, or `--cargo`); there is no positional URL argument.
 - `--ref` / `--commit` are only valid with `--url`. `--subdir` is rejected with `--cargo`.
-- Package specs must be exact versions. `zod@^3`, `zod@latest`, `serde@1` (with no patch), and similar are rejected.
+- Package specs must be concrete registry versions. `zod@^3`, `zod@latest`, and similar range/tag forms are rejected.
 - `grepo add` without `--force` refuses to replace an existing alias.
 - `grepo sync` does not advance commits. Use `grepo update` to move movable entries.
 - npm packages that don't publish `gitHead` metadata cannot be resolved to an exact commit; grepo will refuse and suggest using `--url` against the upstream repo directly.

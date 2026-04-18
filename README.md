@@ -25,7 +25,7 @@ Sources (`grepo add`):
 - `--cargo <spec>` — a crate as you'd pass to `cargo add`: `serde`, `serde@1.0.197`. grepo downloads the published tarball from crates.io and verifies its sha256.
 - `--subdir <path>` — snapshot only a subdirectory of the resolved source tree. Not valid with `--cargo`.
 
-Only exact versions are accepted in package specs; ranges (`^1`, `~1.0`), wildcards, and dist-tags (`latest`) are rejected so that resolution is reproducible.
+Package specs must be concrete registry versions. Ranges (`^1`, `~1.0`), wildcards, and dist-tags (`latest`) are rejected so that resolution is reproducible.
 
 A package spec without a version (`--npm zod`) remains movable on `update` — grepo re-queries the registry and advances to the newest published release. A versioned spec (`--npm zod@3.22.4`) is pinned.
 
@@ -77,7 +77,7 @@ commit = "4e019e37011e778fea85b9dd04d396e9db105ac3"
 url = "git@github.com:tomrford/polarionmcp.git"
 mode = "ref"
 ref = "main"
-commit = "abc123..."
+commit = "9f4d8d7c6b5a4e3f20112233445566778899aabb"
 
 [repos.trpc-server]
 source = "npm:@trpc/server@11.6.0"
