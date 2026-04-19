@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grepo"
+  short_description: "Explain grepo workflow and snapshots"
+  default_prompt: "Use $grepo to understand grepo-managed snapshots, lockfiles, and commands in this project."

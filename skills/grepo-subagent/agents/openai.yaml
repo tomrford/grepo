@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grepo Subagent"
+  short_description: "Delegate grepo-based repo research"
+  default_prompt: "Use $grepo-subagent to have a subagent inspect grepo-managed code and answer a grounded question."
