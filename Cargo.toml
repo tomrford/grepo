@@ -20,12 +20,20 @@ path = "tests/git_integration.rs"
 required-features = ["git-integration-tests"]
 
 [dependencies]
+cargo-lock = "11.0.1"
+chaste-bun = "0.6.0"
+chaste-yarn = { version = "0.6.0", default-features = false, features = [
+    "classic",
+    "berry",
+] }
 clap = { version = "4.6.1", features = ["derive"] }
 dirs = "6.0.0"
 flate2 = "1.0"
 fs4 = "0.13.1"
+package-lock-json-parser = "0.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 sha2 = "0.10"
 tar = "0.4"
 thiserror = "2.0.18"
