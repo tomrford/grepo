@@ -1,6 +1,6 @@
 [package]
 name = "grepo"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Local-first read-only reference repo store for recurring project dependencies."
 license = "MIT"
@@ -9,6 +9,10 @@ repository = "https://github.com/tomrford/grepo"
 homepage = "https://github.com/tomrford/grepo"
 documentation = "https://docs.rs/grepo"
 autotests = false
+exclude = [
+    "dev/**",
+    "grepo/.lock",
+]
 
 [features]
 default = []
