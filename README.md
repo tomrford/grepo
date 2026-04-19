@@ -63,7 +63,7 @@ Development:
 
 Agent integration:
 
-`grepo skill` prints the shipped [`skill/grepo/SKILL.md`](skill/grepo/SKILL.md) text to stdout so an agent can load the exact guidance without guessing the path.
+`grepo skill` prints the shipped [`skills/grepo/SKILL.md`](skills/grepo/SKILL.md) text to stdout so an agent can load the exact guidance without guessing the path.
 
 Example `grepo/.lock`:
 

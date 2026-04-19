@@ -235,7 +235,7 @@ impl Command {
     }
 }
 
-const SKILL_MD: &str = include_str!("../skill/grepo/SKILL.md");
+const SKILL_MD: &str = include_str!("../skills/grepo/SKILL.md");
 
 fn skill() -> Result<RunReport> {
     let mut report = RunReport::success();

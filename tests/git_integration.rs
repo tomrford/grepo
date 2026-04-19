@@ -119,7 +119,7 @@ fn skill_prints_embedded_skill_markdown() {
     assert_eq!(report.exit_code(), ExitCode::SUCCESS);
     assert_eq!(
         report.stdout(),
-        &[include_str!("../skill/grepo/SKILL.md")
+        &[include_str!("../skills/grepo/SKILL.md")
             .trim_end()
             .to_string()]
     );
