@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::Path;
 
@@ -7,14 +5,11 @@ use cargo_lock::Lockfile as CargoLockfile;
 use serde::Deserialize;
 
 use crate::error::{GrepoError, Result};
+use crate::registry::SourceSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectLockKind {
     Cargo,
-    Npm,
-    Pnpm,
-    Bun,
-    Yarn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,6 +22,19 @@ pub(crate) struct ResolvedDependencyVersion {
 pub(crate) struct ProjectDependencySnapshot {
     pub(crate) kind: ProjectLockKind,
     pub(crate) direct_dependencies: Vec<ResolvedDependencyVersion>,
+}
+
+impl ProjectDependencySnapshot {
+    pub(crate) fn version_for(&self, source: &str) -> Option<&str> {
+        match (self.kind, SourceSpec::parse_lock_source(source).ok()?) {
+            (ProjectLockKind::Cargo, SourceSpec::Cargo { name, .. }) => self
+                .direct_dependencies
+                .iter()
+                .find(|dep| dep.name == name)
+                .map(|dep| dep.version.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,9 +96,31 @@ pub(crate) fn parse_cargo_project_lock(root_dir: &Path) -> Result<ProjectDepende
     })
 }
 
+pub(crate) fn parse(path: &Path) -> Result<ProjectDependencySnapshot> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("Cargo.lock") => {
+            let root_dir = path.parent().ok_or_else(|| {
+                GrepoError::ProjectLock(format!(
+                    "{}: lockfile has no parent directory",
+                    path.display()
+                ))
+            })?;
+            parse_cargo_project_lock(root_dir)
+        }
+        Some(name) => Err(GrepoError::ProjectLock(format!(
+            "{}: unsupported project lockfile {name}",
+            path.display()
+        ))),
+        None => Err(GrepoError::ProjectLock(format!(
+            "{}: invalid project lockfile path",
+            path.display()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ProjectLockKind, parse_cargo_project_lock};
+    use super::{ProjectLockKind, parse, parse_cargo_project_lock};
 
     #[test]
     fn parses_grepo_root_cargo_lock() {
@@ -110,5 +140,14 @@ mod tests {
                 .iter()
                 .any(|dep| { dep.name == "thiserror" && dep.version.starts_with('2') })
         );
+    }
+
+    #[test]
+    fn detects_cargo_lock_by_path() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+        let snapshot = parse(&path).unwrap();
+
+        assert_eq!(snapshot.kind, ProjectLockKind::Cargo);
+        assert_eq!(snapshot.version_for("cargo:clap"), Some("4.6.1"));
     }
 }

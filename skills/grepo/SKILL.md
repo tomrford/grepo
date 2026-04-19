@@ -73,7 +73,7 @@ Update semantics for package sources: a `source` string without a version (e.g. 
 - **`grepo list`** — print configured aliases, their source (if any), URL, subdir, and how they track upstream.
 - **`grepo remove <alias>...`** — drop aliases from the lockfile and delete their symlinks.
 - **`grepo sync`** — materialize the commits / tarballs already recorded in the lockfile. Idempotent.
-- **`grepo update [alias...]`** — advance movable entries and rewrite the lockfile. For git entries, that means `default` / `ref` modes fetch and advance. For package-sourced entries, movable means the `source` has no version (`npm:react`, `cargo:serde`); versioned package specs and `exact` git pins are left alone. Omit aliases to update every movable entry.
+- **`grepo update [alias...] [--project-lock <PATH>]`** — advance movable entries and rewrite the lockfile. For git entries, that means `default` / `ref` modes fetch and advance. For package-sourced entries, movable means the `source` has no version (`npm:react`, `cargo:serde`); versioned package specs and `exact` git pins are left alone. Omit aliases to update every movable entry. With `--project-lock`, grepo synchronizes existing package-sourced entries to versions pinned in the project lockfile before materializing them. Current support is `Cargo.lock`.
 - **`grepo gc`** — prune cache snapshots and state entries that no project's lockfile still references. `--verbose` lists each deleted path.
 - **`grepo skill`** — print this skill document to stdout.
 
@@ -90,6 +90,7 @@ grepo add trpc-server --npm @trpc/server@11.6.0
 grepo add serde --cargo serde@1.0.197
 grepo list
 grepo update            # later, to advance movable entries
+grepo update --project-lock Cargo.lock
 grepo gc                # occasionally, to reclaim disk
 ```
 
@@ -102,5 +103,6 @@ grepo gc                # occasionally, to reclaim disk
 - Package specs must be concrete registry versions. `zod@^3`, `zod@latest`, and similar range/tag forms are rejected.
 - `grepo add` without `--force` refuses to replace an existing alias.
 - `grepo sync` does not advance commits. Use `grepo update` to move movable entries.
+- `grepo update --project-lock` currently supports `Cargo.lock` paths only.
 - npm packages that don't publish `gitHead` metadata cannot be resolved to an exact commit; grepo will refuse and suggest using `--url` against the upstream repo directly.
 - The `grepo/` directory and its contents are tool-owned. Only `grepo/.lock` should be committed; the symlinks are generated.

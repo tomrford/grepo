@@ -13,6 +13,7 @@ use crate::git::{Git, ResolveSpec, validate_commit_oid, validate_ref_name, valid
 use crate::manifest::{GitLockEntry, LockEntry, LockMode, Lockfile, TarballLockEntry};
 use crate::mutation_lock::MutationLock;
 use crate::output::RunReport;
+use crate::project_lock::{self, ProjectDependencySnapshot};
 use crate::registry::{self, CargoResolved, NpmResolved, SourceSpec};
 use crate::store::{
     GcReport, Store, is_managed_symlink_name, read_dir_paths, remove_managed_symlink,
@@ -128,10 +129,17 @@ enum Command {
     Init,
     Add(AddCommand),
     List,
-    Remove { aliases: Vec<String> },
+    Remove {
+        aliases: Vec<String>,
+    },
     Sync,
-    Update { aliases: Vec<String> },
-    Gc { verbose: bool },
+    Update {
+        aliases: Vec<String>,
+        project_lock: Option<PathBuf>,
+    },
+    Gc {
+        verbose: bool,
+    },
     Skill,
 }
 
@@ -176,8 +184,12 @@ impl TryFrom<CliCommand> for Command {
                 aliases: validate_aliases(aliases)?,
             }),
             CliCommand::Sync => Ok(Self::Sync),
-            CliCommand::Update(UpdateArgs { aliases }) => Ok(Self::Update {
+            CliCommand::Update(UpdateArgs {
+                aliases,
+                project_lock,
+            }) => Ok(Self::Update {
                 aliases: validate_aliases(aliases)?,
+                project_lock: validate_optional_project_lock(project_lock)?,
             }),
             CliCommand::Gc(GcArgs { verbose }) => Ok(Self::Gc { verbose }),
             CliCommand::Skill => Ok(Self::Skill),
@@ -228,7 +240,10 @@ impl Command {
             Self::List => list(context),
             Self::Remove { aliases } => remove(context, &aliases),
             Self::Sync => sync(context),
-            Self::Update { aliases } => update(context, &aliases),
+            Self::Update {
+                aliases,
+                project_lock,
+            } => update(context, &aliases, project_lock.as_deref()),
             Self::Gc { verbose } => gc(context, verbose),
             Self::Skill => skill(),
         }
@@ -429,7 +444,11 @@ fn sync(context: &AppContext) -> Result<RunReport> {
     Ok(report)
 }
 
-fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
+fn update(
+    context: &AppContext,
+    aliases: &[String],
+    project_lock: Option<&Path>,
+) -> Result<RunReport> {
     let root = required_root(&context.cwd)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
@@ -439,18 +458,54 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
     let explicit_aliases = !aliases.is_empty();
     let mut report = RunReport::success();
     let mut dirty_lock = false;
+    let project_snapshot = match project_lock {
+        Some(path) => Some(project_lock::parse(path)?),
+        None => None,
+    };
+    let mut matched_project_entries = 0usize;
+    let mut rewritten_project_entries = 0usize;
 
     for alias in selected {
         let Some(entry) = lockfile.get(&alias).cloned() else {
             continue;
         };
-        if !entry.can_update() {
+        let project_sync = project_snapshot
+            .as_ref()
+            .map(|snapshot| synchronize_entry_to_project_lock(&entry, snapshot));
+        let (effective_entry, should_force_update) = match project_sync.as_ref() {
+            Some(ProjectLockSync::Rewrite(target)) => {
+                matched_project_entries += 1;
+                rewritten_project_entries += 1;
+                (target, true)
+            }
+            Some(ProjectLockSync::Unchanged) => {
+                matched_project_entries += 1;
+                if explicit_aliases {
+                    report.stdout_line(format!("skipped {alias}: already matches project lock"));
+                }
+                continue;
+            }
+            Some(ProjectLockSync::NoMatch) => {
+                if explicit_aliases {
+                    report.stdout_line(format!("skipped {alias}: no matching project lock entry"));
+                }
+                continue;
+            }
+            None => (&entry, false),
+        };
+        if project_snapshot.is_some() && project_sync.is_none() {
+            if explicit_aliases {
+                report.stdout_line(format!("skipped {alias}: no matching project lock entry"));
+            }
+            continue;
+        }
+        if !should_force_update && !entry.can_update() {
             if explicit_aliases {
                 report.stdout_line(format!("skipped {alias}: exact pin"));
             }
             continue;
         }
-        match realize_entry(context, &store, &entry, true) {
+        match realize_entry(context, &store, effective_entry, true) {
             Ok(realized) => {
                 match apply_realized_alias(&root, &mut lockfile, Some(&entry), &realized) {
                     Ok(()) => {
@@ -474,7 +529,59 @@ fn update(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
         lockfile.write(&root.lock_path)?;
         store.refresh_root(&context.git, &root.lock_path)?;
     }
+    if project_snapshot.is_some() && matched_project_entries == 0 {
+        report.stdout_line("project-lock: no matching grepo entries");
+    } else if project_snapshot.is_some() && rewritten_project_entries == 0 {
+        report.stdout_line("project-lock: matching entries already synchronized");
+    }
     Ok(report)
+}
+
+enum ProjectLockSync {
+    NoMatch,
+    Unchanged,
+    Rewrite(LockEntry),
+}
+
+fn synchronize_entry_to_project_lock(
+    entry: &LockEntry,
+    snapshot: &ProjectDependencySnapshot,
+) -> ProjectLockSync {
+    let Some(source) = entry.source() else {
+        return ProjectLockSync::NoMatch;
+    };
+    let Some(version) = snapshot.version_for(source) else {
+        return ProjectLockSync::NoMatch;
+    };
+    let Ok(spec) = SourceSpec::parse_lock_source(source) else {
+        return ProjectLockSync::NoMatch;
+    };
+
+    match (entry, spec) {
+        (
+            LockEntry::Tarball(tarball),
+            SourceSpec::Cargo {
+                name,
+                version: current_version,
+            },
+        ) => {
+            if current_version.as_deref() == Some(version) {
+                return ProjectLockSync::Unchanged;
+            }
+            ProjectLockSync::Rewrite(LockEntry::Tarball(TarballLockEntry {
+                alias: tarball.alias.clone(),
+                source: SourceSpec::Cargo {
+                    name,
+                    version: Some(version.to_string()),
+                }
+                .to_source_string()
+                .expect("cargo source string"),
+                url: String::new(),
+                sha256: String::new(),
+            }))
+        }
+        _ => ProjectLockSync::NoMatch,
+    }
 }
 
 fn gc(context: &AppContext, verbose: bool) -> Result<RunReport> {
@@ -767,6 +874,10 @@ fn validate_optional_commit(commit: Option<String>) -> Result<Option<String>> {
         .transpose()
 }
 
+fn validate_optional_project_lock(path: Option<String>) -> Result<Option<PathBuf>> {
+    Ok(path.map(PathBuf::from))
+}
+
 fn source_lock_mode(spec: &SourceSpec) -> LockMode {
     match spec {
         SourceSpec::Npm { version, .. } if version.is_none() => LockMode::Default,
@@ -870,6 +981,50 @@ mod tests {
         assert!(matches!(
             lock_mode_for_source("npm:react@19.2.5").unwrap(),
             LockMode::Exact
+        ));
+    }
+
+    #[test]
+    fn project_lock_sync_rewrites_cargo_sources_to_exact_versions() {
+        let snapshot = project_lock::parse(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
+        )
+        .unwrap();
+        let entry = LockEntry::Tarball(TarballLockEntry {
+            alias: "clap".into(),
+            source: "cargo:clap".into(),
+            url: "https://example.invalid".into(),
+            sha256: "deadbeef".into(),
+        });
+
+        let ProjectLockSync::Rewrite(LockEntry::Tarball(updated)) =
+            synchronize_entry_to_project_lock(&entry, &snapshot)
+        else {
+            panic!();
+        };
+
+        assert_eq!(updated.alias, "clap");
+        assert_eq!(updated.source, "cargo:clap@4.6.1");
+        assert!(updated.url.is_empty());
+        assert!(updated.sha256.is_empty());
+    }
+
+    #[test]
+    fn project_lock_sync_detects_already_synchronized_cargo_sources() {
+        let snapshot = project_lock::parse(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
+        )
+        .unwrap();
+        let entry = LockEntry::Tarball(TarballLockEntry {
+            alias: "clap".into(),
+            source: "cargo:clap@4.6.1".into(),
+            url: "https://example.invalid".into(),
+            sha256: "deadbeef".into(),
+        });
+
+        assert!(matches!(
+            synchronize_entry_to_project_lock(&entry, &snapshot),
+            ProjectLockSync::Unchanged
         ));
     }
 }
