@@ -9,9 +9,11 @@ grepo pins recurring read-only reference sources into a project-local `grepo/` d
 
 Sources can come from three places:
 
-- a raw git URL (the user's `git` CLI handles transport and auth),
 - an npm package (resolved through the npm registry to its upstream git commit, optionally with a `subdir`),
-- a cargo crate (downloaded as a sha256-verified tarball from crates.io).
+- a cargo crate (downloaded as a sha256-verified tarball from crates.io),
+- a raw git URL (the user's `git` CLI handles transport and auth).
+
+Prefer using package-manager backed sources in projects that support it to ensure sources match the state of the project. URL backed sources should be used for private repos (since grepo shells out to the user's git install).
 
 ## What the code under `grepo/<alias>` actually is
 
@@ -83,11 +85,11 @@ Mutating commands serialize on `grepo/.mutate.lock`; a second concurrent invocat
 
 ```sh
 grepo init
-grepo add mint --url git@github.com:tomrford/mint.git
-grepo add polarion --url git@github.com:tomrford/polarionmcp.git --ref main
 grepo add zod --npm zod
 grepo add trpc-server --npm @trpc/server@11.6.0
 grepo add serde --cargo serde@1.0.197
+grepo add mint --url git@github.com:tomrford/mint.git
+grepo add polarion --url git@github.com:tomrford/polarionmcp.git --ref main
 grepo list
 grepo update            # later, to advance movable entries
 grepo update --project-lock Cargo.lock
