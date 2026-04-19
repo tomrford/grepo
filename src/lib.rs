@@ -5,6 +5,7 @@ mod git;
 mod manifest;
 mod mutation_lock;
 mod output;
+mod project_lock;
 mod registry;
 mod store;
 mod tarball;

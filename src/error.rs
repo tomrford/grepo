@@ -63,6 +63,9 @@ pub enum GrepoError {
     #[error("invalid source spec: {0}")]
     InvalidSource(String),
 
+    #[error("project lock error: {0}")]
+    ProjectLock(String),
+
     #[error("invalid subdir: {0}")]
     InvalidSubdir(String),
 

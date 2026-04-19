@@ -77,6 +77,11 @@ pub struct RemoveArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct UpdateArgs {
+    /// Synchronize package-sourced entries to versions pinned in a project lockfile.
+    /// Currently supports Cargo.lock paths.
+    #[arg(long, value_name = "PATH")]
+    pub project_lock: Option<String>,
+
     /// Aliases to update; omit to update every tracking alias.
     #[arg(value_name = "ALIAS")]
     pub aliases: Vec<String>,
@@ -169,5 +174,15 @@ mod tests {
             Cli::try_parse_from(["grepo", "add", "react", "--npm", "react", "--ref", "main"])
                 .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn update_parses_project_lock() {
+        let cli = Cli::try_parse_from(["grepo", "update", "--project-lock", "Cargo.lock"]).unwrap();
+        let Command::Update(args) = cli.command else {
+            panic!();
+        };
+        assert_eq!(args.project_lock.as_deref(), Some("Cargo.lock"));
+        assert!(args.aliases.is_empty());
     }
 }

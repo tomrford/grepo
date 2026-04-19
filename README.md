@@ -15,6 +15,7 @@ Current behavior:
 - `list` prints a concise view of configured aliases.
 - `sync` realizes the commits (or tarballs) already recorded in `grepo/.lock`.
 - `update` advances tracked entries and rewrites `grepo/.lock`.
+- `update --project-lock <PATH>` synchronizes existing package-sourced entries to versions pinned in a project lockfile. Current support is `Cargo.lock`.
 - `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles; `--verbose` includes per-path detail.
 - `skill` prints the bundled grepo skill markdown for agents that need the exact operating rules.
 
@@ -55,7 +56,10 @@ grepo add trpc-server --npm @trpc/server@11.6.0
 grepo add serde --cargo serde@1.0.197
 grepo list
 grepo update
+grepo update --project-lock Cargo.lock
 ```
+
+Project-lock synchronization currently supports `Cargo.lock`. Follow-up work for npm, pnpm, Bun, and Yarn lockfiles is tracked in [`dev/project-lock-followups.md`](dev/project-lock-followups.md).
 
 Development:
 
