@@ -30,8 +30,10 @@ jobs:
       - name: Validate release tag
         id: validate
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="$RELEASE_TAG"
           VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
           EXPECTED_TAG="v${VERSION}"
 
@@ -40,7 +42,7 @@ jobs:
             exit 1
           fi
 
-          git fetch --force origin main:refs/remotes/origin/main --tags
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main" "+refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "${TAG}^{commit}")"
           if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "Release tag ${TAG} points at ${TAG_COMMIT}, which is not reachable from origin/main." >&2
@@ -114,8 +116,8 @@ jobs:
       - name: Extract crate metadata
         shell: bash
         run: |
-          echo "PROJECT_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] == "bin") | .name')" >> $GITHUB_ENV
-          echo "PROJECT_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" >> $GITHUB_ENV
+          echo "PROJECT_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] == "bin") | .name')" >> "$GITHUB_ENV"
+          echo "PROJECT_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -131,7 +133,7 @@ jobs:
       - name: Overwrite build command
         if: matrix.job.use-cross
         shell: bash
-        run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
+        run: echo "BUILD_CMD=cross" >> "$GITHUB_ENV"
 
       - name: Build
         shell: bash
@@ -158,8 +160,8 @@ jobs:
           shasum -a 256 "${PKG_NAME}" > "${PKG_NAME}.sha256"
           popd >/dev/null
 
-          echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_ENV
-          echo "PKG_CHECKSUM=${PKG_STAGING}/${PKG_NAME}.sha256" >> $GITHUB_ENV
+          echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> "$GITHUB_ENV"
+          echo "PKG_CHECKSUM=${PKG_STAGING}/${PKG_NAME}.sha256" >> "$GITHUB_ENV"
 
       - name: Publish release
         shell: bash
