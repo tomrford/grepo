@@ -1,15 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build (e.g., v1.0.0)"
-        required: true
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -18,39 +11,80 @@ env:
   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
 
 jobs:
-  create-release:
-    name: Create release
+  validate-release:
+    name: Validate release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_REPO: ${{ github.repository }}
+    if: ${{ !github.event.release.prerelease }}
     outputs:
-      tag_name: ${{ steps.tag.outputs.tag_name }}
+      tag_name: ${{ steps.validate.outputs.tag_name }}
     steps:
-      - name: Resolve tag
-        id: tag
+      - name: Checkout source code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release tag
+        id: validate
         shell: bash
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          EXPECTED_TAG="v${VERSION}"
+
+          if [[ "$TAG" != "$EXPECTED_TAG" ]]; then
+            echo "Release tag ${TAG} does not match Cargo.toml version ${VERSION}; expected ${EXPECTED_TAG}." >&2
+            exit 1
+          fi
+
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          TAG_COMMIT="$(git rev-parse "${TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "Release tag ${TAG} points at ${TAG_COMMIT}, which is not reachable from origin/main." >&2
+            exit 1
+          fi
+
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure release exists
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.tag.outputs.tag_name }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists."
-          else
-            gh release create "$TAG" --generate-notes
-          fi
+  check-release:
+    name: Check release
+    runs-on: ubuntu-latest
+    needs: validate-release
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate-release.outputs.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test git integrations
+        run: cargo test --locked --features git-integration-tests
+
+      - name: Check package
+        run: cargo publish --locked --dry-run
 
   build-release:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
-    needs: create-release
+    needs: [validate-release, check-release]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -75,7 +109,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate-release.outputs.tag_name }}
 
       - name: Extract crate metadata
         shell: bash
@@ -132,13 +166,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.create-release.outputs.tag_name }}"
+          TAG="${{ needs.validate-release.outputs.tag_name }}"
           gh release upload "$TAG" "${{ env.PKG_PATH }}" "${{ env.PKG_CHECKSUM }}" --clobber
 
   publish-crate:
     name: Publish crate
     runs-on: ubuntu-latest
-    needs: build-release
+    needs: [validate-release, build-release]
     environment: crates
     permissions:
       contents: read
@@ -148,7 +182,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate-release.outputs.tag_name }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
