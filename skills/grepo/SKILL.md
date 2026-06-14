@@ -1,6 +1,6 @@
 ---
 name: grepo
-description: "Guide for working with grepo, a Rust CLI that manages project-local read-only reference repositories. Use this skill whenever a project contains a `.repos/` directory (or legacy `grepo/`) with a `.lock` file, when entries under `.repos/<alias>` appear as symlinks into a shared cache, when the user mentions grepo / `grepo add` / `grepo sync` / `grepo update`, or when you notice that code you are reading lives inside a read-only snapshot tree under `.repos/`. Explains the commands, the lockfile, sources (git URL / npm / cargo), and what the symlinked trees actually are."
+description: "Guide for working with grepo, a Rust CLI that manages project-local read-only reference repositories. Use this skill whenever a project contains a `.repos/` directory (or legacy `grepo/`) with a `.lock` file, when entries under `.repos/` appear as symlinks into a shared cache, when the user mentions grepo / `grepo add` / `grepo sync` / `grepo update`, or when you notice that code you are reading lives inside a read-only snapshot tree under `.repos/`. Explains the commands, the lockfile, sources (git URL / npm / cargo), and what the symlinked trees actually are."
 ---
 
 # grepo
