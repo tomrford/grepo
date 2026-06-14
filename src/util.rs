@@ -8,6 +8,12 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::{GrepoError, Result};
 
+pub const DEFAULT_PROJECT_DIR: &str = ".repos";
+pub const LEGACY_PROJECT_DIR: &str = "grepo";
+
+pub const LEGACY_PROJECT_DIR_WARNING: &str =
+    "using legacy grepo/ project directory; the default is now .repos/";
+
 pub fn current_dir() -> Result<PathBuf> {
     std::env::current_dir()
         .map_err(|e| GrepoError::Io(format!("failed to determine current directory: {e}")))

@@ -1,11 +1,13 @@
 ---
 name: grepo
-description: "Guide for working with grepo, a Rust CLI that manages project-local read-only reference repositories. Use this skill whenever a project contains a `grepo/` directory with a `.lock` file, when entries under `grepo/<alias>` appear as symlinks into a shared cache, when the user mentions grepo / `grepo add` / `grepo sync` / `grepo update`, or when you notice that code you are reading lives inside a read-only snapshot tree under `grepo/`. Explains the commands, the lockfile, sources (git URL / npm / cargo), and what the symlinked trees actually are."
+description: "Guide for working with grepo, a Rust CLI that manages project-local read-only reference repositories. Use this skill whenever a project contains a `.repos/` directory (or legacy `grepo/`) with a `.lock` file, when entries under `.repos/<alias>` appear as symlinks into a shared cache, when the user mentions grepo / `grepo add` / `grepo sync` / `grepo update`, or when you notice that code you are reading lives inside a read-only snapshot tree under `.repos/`. Explains the commands, the lockfile, sources (git URL / npm / cargo), and what the symlinked trees actually are."
 ---
 
 # grepo
 
-grepo pins recurring read-only reference sources into a project-local `grepo/` directory. `grepo/.lock` is the tracked source of truth; each `grepo/<alias>` is a generated symlink into a shared cached snapshot (a plain read-only tree with `.git` stripped).
+grepo pins recurring read-only reference sources into a project-local `.repos/` directory. `.repos/.lock` is the tracked source of truth; each `.repos/<alias>` is a generated symlink into a shared cached snapshot (a plain read-only tree with `.git` stripped).
+
+Legacy projects may still use `grepo/` instead of `.repos/`; grepo discovers either, but warns on the legacy path. Override the directory with `grepo --dir <name>` or `GREPO_DIR`.
 
 Sources can come from three places:
 
@@ -15,20 +17,20 @@ Sources can come from three places:
 
 Prefer using package-manager backed sources in projects that support it to ensure sources match the state of the project. URL backed sources should be used for private repos (since grepo shells out to the user's git install).
 
-## What the code under `grepo/<alias>` actually is
+## What the code under `.repos/<alias>` actually is
 
-If you are reading this skill because you are looking at files inside `grepo/<alias>`, note:
+If you are reading this skill because you are looking at files inside `.repos/<alias>` (or legacy `grepo/<alias>`), note:
 
 - The path is a symlink into a shared grepo cache outside the project.
-- The tree is **read-only** and has **no `.git` directory**. `git log`, `git blame`, `git status` inside it will not work. For git-backed entries, use the upstream repo (URL recorded in `grepo/.lock`) for history. For cargo tarball entries, there is no git history — only the published crate contents.
-- The tree is a snapshot of one specific commit (git backend) or one specific published archive (tarball backend), recorded in `grepo/.lock`.
+- The tree is **read-only** and has **no `.git` directory**. `git log`, `git blame`, `git status` inside it will not work. For git-backed entries, use the upstream repo (URL recorded in `.repos/.lock`) for history. For cargo tarball entries, there is no git history — only the published crate contents.
+- The tree is a snapshot of one specific commit (git backend) or one specific published archive (tarball backend), recorded in `.repos/.lock`.
 - It may be a subtree of the upstream source if the entry has a `subdir`.
 - Do not edit files here. Changes will not persist across `grepo sync` / `grepo update` and may be wiped when the symlink is retargeted.
-- If the user asks you to change something that lives under `grepo/<alias>`, the change belongs upstream in that project, not here.
+- If the user asks you to change something that lives under `.repos/<alias>`, the change belongs upstream in that project, not here.
 
 ## Lockfile
 
-`grepo/.lock` is TOML, tool-owned, rewritten canonically. One section per alias.
+`.repos/.lock` is TOML, tool-owned, rewritten canonically. One section per alias.
 
 Git backend (default — no `backend` key):
 
@@ -65,7 +67,7 @@ Update semantics for package sources: a `source` string without a version (e.g. 
 
 ## Commands
 
-- **`grepo init`** — create `grepo/` and an empty `grepo/.lock` in the current directory.
+- **`grepo init`** — create `.repos/` and an empty `.repos/.lock` in the current directory.
 - **`grepo add <alias> <source-flag> [options]`** — register an alias and materialize immediately. Exactly one source flag is required:
   - `--url <git-url>` — raw git URL. Pair with `--ref <branch-or-tag>` (tracking ref) or `--commit <sha>` (exact pin). `--ref` and `--commit` are mutually exclusive and only valid with `--url`.
   - `--npm <spec>` — npm package: `zod`, `chalk@5.3.0`, `@trpc/server@11.6.0`. Use a concrete registry version when you include one; ranges / dist-tags are rejected. Packages that don't publish `gitHead` (e.g. React, Babel) cannot be resolved this way — fall back to `--url` against the upstream repo.
@@ -79,7 +81,11 @@ Update semantics for package sources: a `source` string without a version (e.g. 
 - **`grepo gc`** — prune cache snapshots and state entries that no project's lockfile still references. `--verbose` lists each deleted path.
 - **`grepo skill`** — print this skill document to stdout.
 
-Mutating commands serialize on `grepo/.mutate.lock`; a second concurrent invocation will wait.
+Global flags:
+
+- **`--dir <DIR>`** — use a custom project-local directory instead of `.repos/`.
+
+Mutating commands serialize on `.repos/.mutate.lock`; a second concurrent invocation will wait.
 
 ## Workflow
 
@@ -98,7 +104,7 @@ grepo gc                # occasionally, to reclaim disk
 
 ## Gotchas
 
-- `grepo/<alias>` is read-only — writes fail with `EACCES`. This is intentional.
+- `.repos/<alias>` is read-only — writes fail with `EACCES`. This is intentional.
 - No `.git` inside the snapshot. For git-backed entries, use the upstream URL from `.lock` for history or blame. Cargo tarball entries have no upstream git history available through grepo.
 - `grepo add` requires a source flag (`--url`, `--npm`, or `--cargo`); there is no positional URL argument.
 - `--ref` / `--commit` are only valid with `--url`. `--subdir` is rejected with `--cargo`.
@@ -107,4 +113,4 @@ grepo gc                # occasionally, to reclaim disk
 - `grepo sync` does not advance commits. Use `grepo update` to move movable entries.
 - `grepo update --project-lock` currently supports `Cargo.lock` paths only.
 - npm packages that don't publish `gitHead` metadata cannot be resolved to an exact commit; grepo will refuse and suggest using `--url` against the upstream repo directly.
-- The `grepo/` directory and its contents are tool-owned. Only `grepo/.lock` should be committed; the symlinks are generated.
+- The `.repos/` directory and its contents are tool-owned. Only `.repos/.lock` should be committed; the symlinks are generated.

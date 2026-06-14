@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -8,13 +10,18 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
     arg_required_else_help = true
 )]
 pub struct Cli {
+    /// Project-local directory for grepo-managed reference repos.
+    /// Defaults to `.repos`; legacy projects may still use `grepo/`.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Create a grepo/ directory and empty lockfile in the current directory.
+    /// Create a `.repos/` directory and empty lockfile in the current directory.
     Init,
     /// Register an alias and materialize it immediately.
     Add(AddArgs),
@@ -39,7 +46,7 @@ pub enum Command {
         .args(["url", "npm", "cargo_pkg"])
 ))]
 pub struct AddArgs {
-    /// Short name used for the symlink under grepo/ and the lockfile key.
+    /// Short name used for the symlink under the project repos directory and the lockfile key.
     #[arg(value_name = "ALIAS")]
     pub alias: String,
     /// Git URL (anything `git clone` accepts).
@@ -184,5 +191,11 @@ mod tests {
         };
         assert_eq!(args.project_lock.as_deref(), Some("Cargo.lock"));
         assert!(args.aliases.is_empty());
+    }
+
+    #[test]
+    fn dir_flag_is_global() {
+        let cli = Cli::try_parse_from(["grepo", "--dir", "vendor", "list"]).unwrap();
+        assert_eq!(cli.dir.as_deref(), Some(std::path::Path::new("vendor")));
     }
 }

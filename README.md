@@ -1,20 +1,21 @@
 # grepo
 
-`grepo` is a small Rust CLI for keeping recurring reference repositories under a project-local `grepo/` directory.
+`grepo` is a small Rust CLI for keeping recurring reference repositories under a project-local `.repos/` directory.
 
-It keeps `grepo/.lock` as the tracked source of truth, materializes read-only snapshots in a shared local cache, and exposes stable symlinks like `grepo/mint` inside the project.
+It keeps `.repos/.lock` as the tracked source of truth, materializes read-only snapshots in a shared local cache, and exposes stable symlinks like `.repos/mint` inside the project.
 
-Sources can be raw git URLs, npm packages, or cargo crates. For git and npm, `grepo` shells out to your installed `git` for transport, auth, and private-repo access. For cargo (and any future tarball backend), `grepo` fetches over HTTPS and verifies a sha256. Treat repo URLs, registry responses, and checked-in `grepo/.lock` files as trusted inputs; `grepo` intentionally relies on your local git configuration instead of reimplementing credentials or transport policy.
+Sources can be raw git URLs, npm packages, or cargo crates. For git and npm, `grepo` shells out to your installed `git` for transport, auth, and private-repo access. For cargo (and any future tarball backend), `grepo` fetches over HTTPS and verifies a sha256. Treat repo URLs, registry responses, and checked-in `.repos/.lock` files as trusted inputs; `grepo` intentionally relies on your local git configuration instead of reimplementing credentials or transport policy.
 
 Current behavior:
 
-- `grepo/` is tool-owned.
-- `grepo/.lock` is rewritten canonically by the tool.
-- `grepo/<alias>` entries are generated symlinks and may be replaced or pruned by `sync`.
+- `.repos/` is tool-owned (override with `--dir` or `GREPO_DIR`).
+- `.repos/.lock` is rewritten canonically by the tool.
+- `.repos/<alias>` entries are generated symlinks and may be replaced or pruned by `sync`.
+- Legacy `grepo/` directories are still discovered, with a warning.
 - `add` resolves and materializes immediately, and refuses to replace an existing alias unless `--force` is passed.
 - `list` prints a concise view of configured aliases.
-- `sync` realizes the commits (or tarballs) already recorded in `grepo/.lock`.
-- `update` advances tracked entries and rewrites `grepo/.lock`.
+- `sync` realizes the commits (or tarballs) already recorded in `.repos/.lock`.
+- `update` advances tracked entries and rewrites `.repos/.lock`.
 - `update --project-lock <PATH>` synchronizes existing package-sourced entries to versions pinned in a project lockfile. Current support is `Cargo.lock`.
 - `gc` prunes unreachable snapshots, remote caches, and stale rooted lockfiles; `--verbose` includes per-path detail.
 - `skill` prints the bundled grepo skill markdown for agents that need the exact operating rules.
@@ -59,6 +60,15 @@ grepo update
 grepo update --project-lock Cargo.lock
 ```
 
+Project directory:
+
+- Default: `.repos/`
+- Override per invocation: `grepo --dir vendor sync`
+- Override via environment: `GREPO_DIR=vendor grepo sync`
+- Legacy `grepo/` is still supported with a warning
+
+There is no user config file today; use `--dir` or `GREPO_DIR` to pick a non-default directory name.
+
 Project-lock synchronization currently supports `Cargo.lock`. Follow-up work for npm, pnpm, Bun, and Yarn lockfiles is tracked in [`dev/project-lock-followups.md`](dev/project-lock-followups.md).
 
 Development:
@@ -69,7 +79,7 @@ Agent integration:
 
 `grepo skill` prints the shipped [`skills/grepo/SKILL.md`](skills/grepo/SKILL.md) text to stdout so an agent can load the exact guidance without guessing the path.
 
-Example `grepo/.lock`:
+Example `.repos/.lock`:
 
 ```toml
 [repos.mint]
