@@ -1006,9 +1006,7 @@ pub(crate) fn run_for_test(
             .collect::<Vec<_>>(),
     )?;
     let command = Command::try_from(cli.command)?;
-    let project_dir = cli
-        .dir
-        .or_else(|| std::env::var_os("GREPO_DIR").map(PathBuf::from));
+    let project_dir = cli.dir;
     let context = AppContext {
         cwd,
         project_dir,
