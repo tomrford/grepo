@@ -11,7 +11,7 @@ documentation = "https://docs.rs/grepo"
 autotests = false
 exclude = [
     "dev/**",
-    "grepo/.lock",
+    ".repos/.lock",
 ]
 
 [features]

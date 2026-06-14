@@ -435,7 +435,7 @@ commit = "abc"
 
         let msg = format!("{error}");
         assert!(
-            msg.contains("missing mode") || msg.contains("invalid grepo/.lock TOML"),
+            msg.contains("missing mode") || msg.contains("invalid lockfile TOML"),
             "unexpected error: {msg}"
         );
     }
@@ -450,7 +450,7 @@ mode = "default"
         )
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "invalid alias in grepo/.lock: .bad");
+        assert_eq!(error.to_string(), "invalid alias in lockfile: .bad");
     }
 
     #[test]

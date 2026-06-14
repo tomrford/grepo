@@ -15,10 +15,10 @@ pub enum GrepoError {
     #[error("{0}")]
     Command(String),
 
-    #[error("invalid grepo/.lock TOML: {0}")]
+    #[error("invalid lockfile TOML: {0}")]
     LockParse(#[from] toml::de::Error),
 
-    #[error("failed to serialize grepo/.lock: {0}")]
+    #[error("failed to serialize lockfile: {0}")]
     LockSerialize(#[from] toml::ser::Error),
 
     #[error("invalid alias: {0}")]
@@ -30,7 +30,7 @@ pub enum GrepoError {
     #[error("invalid commit: {0}")]
     InvalidCommit(String),
 
-    #[error("invalid alias in grepo/.lock: {0}")]
+    #[error("invalid alias in lockfile: {0}")]
     InvalidLockAlias(String),
 
     #[error("cannot initialize grepo root because {0} is not a directory")]
@@ -57,7 +57,7 @@ pub enum GrepoError {
     #[error("another grepo command is already mutating shared store {0}")]
     StoreBusy(PathBuf),
 
-    #[error("invalid grepo/.lock entry: {0}")]
+    #[error("invalid lockfile entry: {0}")]
     LockShape(String),
 
     #[error("invalid source spec: {0}")]

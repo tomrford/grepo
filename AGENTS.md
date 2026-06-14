@@ -1,17 +1,18 @@
 ## Project Overview
 
-grepo is a Rust CLI for managing project-local read-only reference repos under `grepo/`.
+grepo is a Rust CLI for managing project-local read-only reference repos under `.repos/` (legacy: `grepo/`).
 
 Current shape:
 
-- `grepo/.lock` is the tracked source of truth.
-- `grepo/<alias>` are generated symlinks into shared cached snapshots.
+- `.repos/.lock` is the tracked source of truth.
+- `.repos/<alias>` are generated symlinks into shared cached snapshots.
 - Snapshots are plain read-only trees with `.git` stripped.
 - Two backends: `git` (clone + snapshot a commit) and `tarball` (fetch + extract a sha256-verified archive).
 - Git sources shell out to the user's `git` CLI. Tarball sources fetch over HTTPS via `ureq`.
 - Package-manager sources (`npm:`, `cargo:`) resolve through the public registries: npm maps a published version to its upstream git commit (+`repository.directory` as `subdir`); cargo downloads the crate tarball from crates.io.
 - Optional `subdir` carves out a subtree of the resolved source as the snapshot root (git-backed entries only).
-- Mutating commands take an exclusive file lock on `grepo/.mutate.lock`.
+- Mutating commands take an exclusive file lock on `.repos/.mutate.lock`.
+- Override the project directory with `--dir` or `GREPO_DIR`.
 
 ## Development Environment
 

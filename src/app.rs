@@ -19,7 +19,10 @@ use crate::store::{
     GcReport, Store, is_managed_symlink_name, read_dir_paths, remove_managed_symlink,
     replace_symlink, symlink_metadata_if_exists,
 };
-use crate::util::{cache_root, current_dir, ensure_dir, is_valid_alias, state_root, write_atomic};
+use crate::util::{
+    DEFAULT_PROJECT_DIR, LEGACY_PROJECT_DIR, LEGACY_PROJECT_DIR_WARNING, cache_root, current_dir,
+    ensure_dir, is_valid_alias, state_root, write_atomic,
+};
 
 pub fn main_entry() -> ExitCode {
     match run_env(std::env::args_os().collect()) {
@@ -47,8 +50,12 @@ fn run_env(args: Vec<OsString>) -> Result<RunReport> {
     let cli = Cli::try_parse_from(args)?;
     let command = Command::try_from(cli.command)?;
     let cwd = current_dir()?;
+    let project_dir = cli
+        .dir
+        .or_else(|| std::env::var_os("GREPO_DIR").map(PathBuf::from));
     let context = AppContext {
         cwd,
+        project_dir,
         cache_root: cache_root()?,
         state_root: state_root()?,
         git: Git::new("git"),
@@ -60,6 +67,7 @@ fn run_env(args: Vec<OsString>) -> Result<RunReport> {
 #[derive(Clone, Debug)]
 struct AppContext {
     cwd: PathBuf,
+    project_dir: Option<PathBuf>,
     cache_root: PathBuf,
     state_root: PathBuf,
     git: Git,
@@ -78,10 +86,52 @@ struct ProjectRoot {
     lock_path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+struct DiscoveredRoot {
+    root: ProjectRoot,
+    warnings: Vec<String>,
+}
+
 impl ProjectRoot {
-    fn discover(start: &Path) -> Option<Self> {
-        for dir in start.ancestors() {
-            let grepo_dir = dir.join("grepo");
+    fn discover(start: &Path, dir_override: Option<&Path>) -> Option<DiscoveredRoot> {
+        if let Some(dir) = dir_override {
+            return Self::discover_named(start, dir).map(|root| DiscoveredRoot {
+                root,
+                warnings: Vec::new(),
+            });
+        }
+
+        for ancestor in start.ancestors() {
+            let modern_dir = ancestor.join(DEFAULT_PROJECT_DIR);
+            let lock_path = modern_dir.join(".lock");
+            if lock_path.is_file() {
+                return Some(DiscoveredRoot {
+                    root: Self {
+                        grepo_dir: modern_dir,
+                        lock_path,
+                    },
+                    warnings: Vec::new(),
+                });
+            }
+
+            let legacy_dir = ancestor.join(LEGACY_PROJECT_DIR);
+            let legacy_lock = legacy_dir.join(".lock");
+            if legacy_lock.is_file() {
+                return Some(DiscoveredRoot {
+                    root: Self {
+                        grepo_dir: legacy_dir,
+                        lock_path: legacy_lock,
+                    },
+                    warnings: vec![LEGACY_PROJECT_DIR_WARNING.into()],
+                });
+            }
+        }
+        None
+    }
+
+    fn discover_named(start: &Path, dir: &Path) -> Option<ProjectRoot> {
+        for ancestor in start.ancestors() {
+            let grepo_dir = ancestor.join(dir);
             let lock_path = grepo_dir.join(".lock");
             if lock_path.is_file() {
                 return Some(Self {
@@ -93,8 +143,8 @@ impl ProjectRoot {
         None
     }
 
-    fn create_at(project_dir: &Path) -> Result<Self> {
-        let grepo_dir = project_dir.join("grepo");
+    fn create_at(project_dir: &Path, dir: &Path) -> Result<Self> {
+        let grepo_dir = resolve_project_dir_path(project_dir, dir);
         if grepo_dir.exists() && !grepo_dir.is_dir() {
             return Err(GrepoError::RootPathNotDirectory(grepo_dir));
         }
@@ -259,8 +309,10 @@ fn skill() -> Result<RunReport> {
 }
 
 fn init(context: &AppContext) -> Result<RunReport> {
-    let existed = context.cwd.join("grepo/.lock").is_file();
-    let root = ProjectRoot::create_at(&context.cwd)?;
+    let dir = effective_project_dir(context);
+    let grepo_dir = resolve_project_dir_path(&context.cwd, &dir);
+    let existed = grepo_dir.join(".lock").is_file();
+    let root = ProjectRoot::create_at(&context.cwd, &dir)?;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
@@ -277,10 +329,14 @@ fn init(context: &AppContext) -> Result<RunReport> {
 }
 
 fn add(context: &AppContext, args: AddCommand) -> Result<RunReport> {
-    let root = match ProjectRoot::discover(&context.cwd) {
-        Some(root) => root,
-        None => ProjectRoot::create_at(&context.cwd)?,
+    let discovered = match ProjectRoot::discover(&context.cwd, context.project_dir.as_deref()) {
+        Some(discovered) => discovered,
+        None => DiscoveredRoot {
+            root: ProjectRoot::create_at(&context.cwd, &effective_project_dir(context))?,
+            warnings: Vec::new(),
+        },
     };
+    let root = discovered.root;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
@@ -298,6 +354,7 @@ fn add(context: &AppContext, args: AddCommand) -> Result<RunReport> {
     store.refresh_root(&context.git, &root.lock_path)?;
 
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &discovered.warnings);
     let verb = if existing.is_some() {
         "replaced"
     } else {
@@ -364,9 +421,10 @@ fn build_entry(args: &AddCommand) -> Result<LockEntry> {
 }
 
 fn list(context: &AppContext) -> Result<RunReport> {
-    let root = required_root(&context.cwd)?;
-    let lockfile = root.load_lockfile()?;
+    let discovered = required_root(&context.cwd, context.project_dir.as_deref())?;
+    let lockfile = discovered.root.load_lockfile()?;
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &discovered.warnings);
     let rendered = render_list(&lockfile);
     if !rendered.is_empty() {
         report.stdout_line(rendered);
@@ -375,7 +433,8 @@ fn list(context: &AppContext) -> Result<RunReport> {
 }
 
 fn remove(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
-    let root = required_root(&context.cwd)?;
+    let discovered = required_root(&context.cwd, context.project_dir.as_deref())?;
+    let root = discovered.root;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
@@ -391,6 +450,7 @@ fn remove(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
     store.refresh_root(&context.git, &root.lock_path)?;
 
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &discovered.warnings);
     for alias in &selected {
         if let Err(error) = remove_managed_symlink(&root.grepo_dir.join(alias)) {
             report.warn_line(error.to_string());
@@ -403,13 +463,15 @@ fn remove(context: &AppContext, aliases: &[String]) -> Result<RunReport> {
 }
 
 fn sync(context: &AppContext) -> Result<RunReport> {
-    let root = required_root(&context.cwd)?;
+    let discovered = required_root(&context.cwd, context.project_dir.as_deref())?;
+    let root = discovered.root;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
     let mut lockfile = root.load_lockfile()?;
     let mut dirty_lock = false;
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &discovered.warnings);
 
     for alias in lockfile.aliases() {
         let Some(entry) = lockfile.get(&alias).cloned() else {
@@ -449,7 +511,8 @@ fn update(
     aliases: &[String],
     project_lock: Option<&Path>,
 ) -> Result<RunReport> {
-    let root = required_root(&context.cwd)?;
+    let discovered = required_root(&context.cwd, context.project_dir.as_deref())?;
+    let root = discovered.root;
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
@@ -457,6 +520,7 @@ fn update(
     let selected = lockfile.select_aliases(aliases)?;
     let explicit_aliases = !aliases.is_empty();
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &discovered.warnings);
     let mut dirty_lock = false;
     let project_snapshot = match project_lock {
         Some(path) => Some(project_lock::parse(path)?),
@@ -834,8 +898,30 @@ fn format_count(count: usize, noun: &str) -> String {
     format!("{count} {noun}{suffix}")
 }
 
-fn required_root(start: &Path) -> Result<ProjectRoot> {
-    ProjectRoot::discover(start).ok_or_else(|| GrepoError::NoProjectRoot(start.to_path_buf()))
+fn required_root(start: &Path, dir_override: Option<&Path>) -> Result<DiscoveredRoot> {
+    ProjectRoot::discover(start, dir_override)
+        .ok_or_else(|| GrepoError::NoProjectRoot(start.to_path_buf()))
+}
+
+fn effective_project_dir(context: &AppContext) -> PathBuf {
+    context
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECT_DIR))
+}
+
+fn resolve_project_dir_path(project_dir: &Path, dir: &Path) -> PathBuf {
+    if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        project_dir.join(dir)
+    }
+}
+
+fn apply_warnings(report: &mut RunReport, warnings: &[String]) {
+    for warning in warnings {
+        report.warn_line(warning.clone());
+    }
 }
 
 fn prepared_store(context: &AppContext) -> Result<Store> {
@@ -920,8 +1006,10 @@ pub(crate) fn run_for_test(
             .collect::<Vec<_>>(),
     )?;
     let command = Command::try_from(cli.command)?;
+    let project_dir = cli.dir;
     let context = AppContext {
         cwd,
+        project_dir,
         cache_root,
         state_root,
         git: Git::new(git_program),
@@ -1026,5 +1114,52 @@ mod tests {
             synchronize_entry_to_project_lock(&entry, &snapshot),
             ProjectLockSync::Unchanged
         ));
+    }
+
+    #[test]
+    fn discover_prefers_modern_repos_over_legacy_grepo() {
+        let base = std::env::temp_dir().join(format!(
+            "grepo-discover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join(".repos")).unwrap();
+        std::fs::create_dir_all(project.join("grepo")).unwrap();
+        std::fs::write(project.join(".repos/.lock"), "").unwrap();
+        std::fs::write(project.join("grepo/.lock"), "").unwrap();
+
+        let discovered = ProjectRoot::discover(&project, None).unwrap();
+        assert_eq!(discovered.root.grepo_dir, project.join(DEFAULT_PROJECT_DIR));
+        assert!(discovered.warnings.is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn discover_warns_for_legacy_grepo_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "grepo-legacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join("grepo")).unwrap();
+        std::fs::write(project.join("grepo/.lock"), "").unwrap();
+
+        let discovered = ProjectRoot::discover(&project, None).unwrap();
+        assert_eq!(discovered.root.grepo_dir, project.join(LEGACY_PROJECT_DIR));
+        assert_eq!(
+            discovered.warnings,
+            vec![LEGACY_PROJECT_DIR_WARNING.to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

@@ -57,12 +57,12 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
     assert_eq!(report.stdout().len(), 1);
     assert!(report.stdout()[0].starts_with("added docs -> "));
 
-    let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lockfile = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert!(lockfile.contains("[repos.docs]"));
     assert!(lockfile.contains("mode = \"default\""));
     assert!(lockfile.contains("commit = "));
 
-    let link = workspace.join("grepo/docs");
+    let link = workspace.join(".repos/docs");
     assert!(
         fs::symlink_metadata(&link)
             .unwrap()
@@ -94,7 +94,10 @@ fn init_reports_existing_root_on_second_run() {
     .unwrap();
     assert_eq!(
         first.stdout(),
-        &[format!("initialized {}", workspace.join("grepo").display())]
+        &[format!(
+            "initialized {}",
+            workspace.join(".repos").display()
+        )]
     );
 
     let second = run_for_test(workspace, cache_root, state_root, "git".into(), &["init"]).unwrap();
@@ -102,7 +105,7 @@ fn init_reports_existing_root_on_second_run() {
         second.stdout(),
         &[format!(
             "already initialized {}",
-            root.path.join("workspace/grepo").display()
+            root.path.join("workspace/.repos").display()
         )]
     );
 }
@@ -132,7 +135,7 @@ fn update_project_lock_reports_already_synchronized_cargo_entry_without_rewritin
     let workspace = root.path.join("workspace");
     let cache_root = root.path.join("cache");
     let state_root = root.path.join("state");
-    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::create_dir_all(workspace.join(".repos")).unwrap();
 
     fs::write(
         workspace.join("Cargo.toml"),
@@ -168,7 +171,7 @@ source = "cargo:cargo-lock@11.0.1"
 url = "https://crates.io/api/v1/crates/cargo-lock/11.0.1/download"
 sha256 = "63585cdf8572aa7adf0e30a253f988f2b77233bfac1973d52efb6dd53a75920e"
 "#;
-    fs::write(workspace.join("grepo/.lock"), initial_lock).unwrap();
+    fs::write(workspace.join(".repos/.lock"), initial_lock).unwrap();
 
     let report = run_for_test(
         workspace.clone(),
@@ -189,7 +192,7 @@ sha256 = "63585cdf8572aa7adf0e30a253f988f2b77233bfac1973d52efb6dd53a75920e"
         report.stderr()
     );
     assert_eq!(
-        fs::read_to_string(workspace.join("grepo/.lock")).unwrap(),
+        fs::read_to_string(workspace.join(".repos/.lock")).unwrap(),
         initial_lock
     );
 }
@@ -202,7 +205,7 @@ fn add_does_not_write_lockfile_when_alias_path_collides() {
     let state_root = root.path.join("state");
     let remote = root.path.join("remote.git");
     let seed = root.path.join("seed");
-    fs::create_dir_all(workspace.join("grepo/docs")).unwrap();
+    fs::create_dir_all(workspace.join(".repos/docs")).unwrap();
 
     seed_remote_repo(&remote, &seed, "README.md", "hello\n");
 
@@ -218,13 +221,13 @@ fn add_does_not_write_lockfile_when_alias_path_collides() {
         format!("{error}"),
         format!(
             "path collision at {}: expected a symlink managed by grepo",
-            workspace.join("grepo/docs").display()
+            workspace.join(".repos/docs").display()
         )
     );
 
-    let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lockfile = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert!(!lockfile.contains("[repos.docs]"));
-    assert!(workspace.join("grepo/docs").is_dir());
+    assert!(workspace.join(".repos/docs").is_dir());
 }
 
 #[test]
@@ -265,7 +268,7 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
     );
     assert_eq!(
         fs::read_to_string(
-            fs::canonicalize(workspace.join("grepo/docs"))
+            fs::canonicalize(workspace.join(".repos/docs"))
                 .unwrap()
                 .join("README.md")
         )
@@ -292,7 +295,7 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
     assert!(report.stdout()[0].starts_with("replaced docs -> "));
     assert_eq!(
         fs::read_to_string(
-            fs::canonicalize(workspace.join("grepo/docs"))
+            fs::canonicalize(workspace.join(".repos/docs"))
                 .unwrap()
                 .join("README.md")
         )
@@ -352,7 +355,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
     git(Some(&seed_a), &["push"]);
 
     let before_b = fs::read_to_string(
-        fs::canonicalize(workspace.join("grepo/b"))
+        fs::canonicalize(workspace.join(".repos/b"))
             .unwrap()
             .join("b.txt"),
     )
@@ -368,13 +371,13 @@ fn update_specific_alias_changes_only_targeted_entry() {
     assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
 
     let after_a = fs::read_to_string(
-        fs::canonicalize(workspace.join("grepo/a"))
+        fs::canonicalize(workspace.join(".repos/a"))
             .unwrap()
             .join("a.txt"),
     )
     .unwrap();
     let after_b = fs::read_to_string(
-        fs::canonicalize(workspace.join("grepo/b"))
+        fs::canonicalize(workspace.join(".repos/b"))
             .unwrap()
             .join("b.txt"),
     )
@@ -415,7 +418,7 @@ fn sync_warns_on_path_collision_and_continues_other_aliases() {
     )
     .unwrap();
 
-    let collision_path = workspace.join("grepo/a");
+    let collision_path = workspace.join(".repos/a");
     fs::remove_file(&collision_path).unwrap();
     fs::create_dir(&collision_path).unwrap();
 
@@ -465,7 +468,7 @@ fn gc_prunes_unreachable_snapshots_and_remotes_from_rooted_lockfiles() {
     )
     .unwrap();
 
-    let rooted_snapshot = fs::canonicalize(nested.join("grepo/docs")).unwrap();
+    let rooted_snapshot = fs::canonicalize(nested.join(".repos/docs")).unwrap();
     let remote_key_dir = rooted_snapshot.parent().unwrap().to_path_buf();
     let remote_cache = cache_root.join("remotes").join(format!(
         "{}.git",
@@ -563,7 +566,7 @@ fn gc_warns_and_skips_unreadable_root_lockfiles() {
     let seed = root.path.join("seed");
     let broken_project = root.path.join("broken-project");
     fs::create_dir_all(&nested).unwrap();
-    fs::create_dir_all(broken_project.join("grepo")).unwrap();
+    fs::create_dir_all(broken_project.join(".repos")).unwrap();
 
     seed_remote_repo(&remote, &seed, "file.txt", "v1\n");
 
@@ -576,7 +579,7 @@ fn gc_warns_and_skips_unreadable_root_lockfiles() {
     )
     .unwrap();
 
-    let broken_lock = broken_project.join("grepo/.lock");
+    let broken_lock = broken_project.join(".repos/.lock");
     fs::write(
         &broken_lock,
         r#"[repos.bad]
@@ -600,7 +603,7 @@ commit = "deadbeef"
     assert_eq!(report.exit_code(), ExitCode::from(1));
     assert_eq!(report.stderr().len(), 1);
     assert!(report.stderr()[0].starts_with("warning: skipped rooted lockfile "));
-    assert!(report.stderr()[0].contains("invalid grepo/.lock entry"));
+    assert!(report.stderr()[0].contains("invalid lockfile entry"));
     assert!(report.stderr()[0].contains("missing mode"));
 }
 
@@ -610,9 +613,9 @@ fn list_omits_tracking_commits_but_keeps_exact_pins() {
     let workspace = root.path.join("workspace");
     let cache_root = root.path.join("cache");
     let state_root = root.path.join("state");
-    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::create_dir_all(workspace.join(".repos")).unwrap();
     fs::write(
-        workspace.join("grepo/.lock"),
+        workspace.join(".repos/.lock"),
         r#"[repos.default_branch]
 url = "git@example.com:org/default.git"
 mode = "default"
@@ -673,7 +676,7 @@ fn remove_deletes_dangling_managed_symlink() {
     )
     .unwrap();
 
-    let link = workspace.join("grepo/docs");
+    let link = workspace.join(".repos/docs");
     let snapshot = fs::canonicalize(&link).unwrap();
     make_tree_writable(&snapshot);
     fs::remove_dir_all(&snapshot).unwrap();
@@ -713,7 +716,7 @@ fn sync_prunes_dangling_symlinks_in_tool_owned_dir() {
     )
     .unwrap();
 
-    let link = workspace.join("grepo/manual");
+    let link = workspace.join(".repos/manual");
     symlink(workspace.join("missing"), &link).unwrap();
 
     let report = run_for_test(
@@ -753,7 +756,7 @@ fn add_rejects_leading_dot_aliases() {
     )
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid alias: .lock");
-    assert!(!workspace.join("grepo").exists());
+    assert!(!workspace.join(".repos").exists());
 }
 
 #[test]
@@ -783,7 +786,7 @@ fn add_rejects_refs_that_start_with_dash() {
     )
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid ref: --upload-pack=/bin/echo");
-    assert!(!workspace.join("grepo").exists());
+    assert!(!workspace.join(".repos").exists());
 }
 
 #[test]
@@ -813,7 +816,7 @@ fn add_rejects_non_oid_commit_values() {
     )
     .unwrap_err();
     assert_eq!(format!("{error}"), "invalid commit: --orphan");
-    assert!(!workspace.join("grepo").exists());
+    assert!(!workspace.join(".repos").exists());
 }
 
 #[test]
@@ -847,7 +850,7 @@ fn add_ref_named_default_is_not_ambiguous_in_lockfile() {
     .unwrap();
     assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
 
-    let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lockfile = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert!(lockfile.contains("mode = \"ref\""));
     assert!(lockfile.contains("ref = \"default\""));
     assert!(!lockfile.contains("mode = \"default\""));
@@ -924,19 +927,19 @@ fn remove_validates_full_alias_list_before_removing_anything() {
     assert_eq!(format!("{error}"), "alias not found: missing");
 
     assert!(
-        fs::symlink_metadata(workspace.join("grepo/a"))
+        fs::symlink_metadata(workspace.join(".repos/a"))
             .unwrap()
             .file_type()
             .is_symlink()
     );
     assert!(
-        fs::symlink_metadata(workspace.join("grepo/b"))
+        fs::symlink_metadata(workspace.join(".repos/b"))
             .unwrap()
             .file_type()
             .is_symlink()
     );
 
-    let lockfile = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lockfile = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert!(lockfile.contains("[repos.a]"));
     assert!(lockfile.contains("[repos.b]"));
 }
@@ -957,7 +960,7 @@ fn sync_reports_busy_mutation_lock() {
         &["init"],
     )
     .unwrap();
-    let lock_path = workspace.join("grepo/.mutate.lock");
+    let lock_path = workspace.join(".repos/.mutate.lock");
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -979,7 +982,7 @@ fn sync_reports_busy_mutation_lock() {
         format!("{error}"),
         format!(
             "another grepo command is already mutating {}",
-            workspace.join("grepo").display()
+            workspace.join(".repos").display()
         )
     );
 }
@@ -1046,7 +1049,7 @@ fn init_leaves_mutation_lock_file_empty() {
     .unwrap();
 
     assert_eq!(
-        fs::read_to_string(workspace.join("grepo/.mutate.lock")).unwrap(),
+        fs::read_to_string(workspace.join(".repos/.mutate.lock")).unwrap(),
         ""
     );
 }
@@ -1083,7 +1086,7 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
     )
     .unwrap();
 
-    let lock_before = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lock_before = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     let commit_a_before =
         extract_lock_commit(&lock_before, "a").expect("existing commit for alias a");
 
@@ -1123,7 +1126,7 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
     );
     git(Some(&seed_b), &["push"]);
 
-    let collision_path = workspace.join("grepo/a");
+    let collision_path = workspace.join(".repos/a");
     fs::remove_file(&collision_path).unwrap();
     fs::create_dir(&collision_path).unwrap();
 
@@ -1150,11 +1153,11 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
             .any(|line| line.starts_with("updated b -> "))
     );
 
-    let lock_after = fs::read_to_string(workspace.join("grepo/.lock")).unwrap();
+    let lock_after = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert_eq!(extract_lock_commit(&lock_after, "a"), Some(commit_a_before));
 
     let updated_b = fs::read_to_string(
-        fs::canonicalize(workspace.join("grepo/b"))
+        fs::canonicalize(workspace.join(".repos/b"))
             .unwrap()
             .join("b.txt"),
     )
@@ -1252,9 +1255,9 @@ fn sync_warns_on_invalid_ref_before_running_git() {
     let workspace = root.path.join("workspace");
     let cache_root = root.path.join("cache");
     let state_root = root.path.join("state");
-    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::create_dir_all(workspace.join(".repos")).unwrap();
     fs::write(
-        workspace.join("grepo/.lock"),
+        workspace.join(".repos/.lock"),
         r#"[repos.docs]
 url = "git@example.com:org/docs.git"
 mode = "ref"
@@ -1292,12 +1295,76 @@ fn add_uses_owner_only_store_permissions() {
     )
     .unwrap();
 
-    let snapshot_dir = fs::canonicalize(workspace.join("grepo/docs")).unwrap();
+    let snapshot_dir = fs::canonicalize(workspace.join(".repos/docs")).unwrap();
     let snapshot_file = snapshot_dir.join("secret.txt");
     assert_eq!(mode_bits(&cache_root), 0o700);
     assert_eq!(mode_bits(&state_root), 0o700);
     assert_eq!(mode_bits(&snapshot_dir), 0o500);
     assert_eq!(mode_bits(&snapshot_file), 0o400);
+}
+
+#[test]
+fn legacy_grepo_directory_emits_warning() {
+    let root = TestDir::new("legacy-grepo");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::write(workspace.join("grepo/.lock"), "").unwrap();
+
+    let report = run_for_test(workspace, cache_root, state_root, "git".into(), &["list"]).unwrap();
+    assert_eq!(report.exit_code(), ExitCode::from(1));
+    assert!(report.stdout().is_empty());
+    assert_eq!(
+        report.stderr(),
+        &[
+            "warning: using legacy grepo/ project directory; the default is now .repos/"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn dir_flag_selects_custom_project_directory() {
+    let root = TestDir::new("custom-dir");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(workspace.join("vendor")).unwrap();
+    fs::write(workspace.join("vendor/.lock"), "").unwrap();
+
+    let report = run_for_test(
+        workspace,
+        cache_root,
+        state_root,
+        "git".into(),
+        &["--dir", "vendor", "list"],
+    )
+    .unwrap();
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
+    assert!(report.stderr().is_empty());
+}
+
+#[test]
+fn modern_repos_directory_takes_precedence_over_legacy_grepo() {
+    let root = TestDir::new("repos-precedence");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::create_dir_all(workspace.join(".repos")).unwrap();
+    fs::write(workspace.join("grepo/.lock"), "[repos.legacy]\n").unwrap();
+    fs::write(
+        workspace.join(".repos/.lock"),
+        "[repos.modern]\nurl = \"https://example.invalid\"\nmode = \"exact\"\ncommit = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+    )
+    .unwrap();
+
+    let report = run_for_test(workspace, cache_root, state_root, "git".into(), &["list"]).unwrap();
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
+    assert!(report.stderr().is_empty());
+    assert!(report.stdout()[0].contains("[repos.modern]"));
+    assert!(!report.stdout()[0].contains("[repos.legacy]"));
 }
 
 fn seed_remote_repo(remote: &Path, seed: &Path, file_name: &str, contents: &str) {
