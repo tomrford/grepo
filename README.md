@@ -73,7 +73,7 @@ Project-lock synchronization currently supports `Cargo.lock`. Follow-up work for
 
 Development:
 
-`cargo test` runs the fast default suite. The git-backed integration tests are opt-in and expect `git` on `PATH`: `cargo test --features git-integration-tests`.
+Install a stable Rust toolchain with [rustup](https://rustup.rs/), then use cargo. `cargo test` runs the fast default suite. The git-backed integration tests are opt-in and expect `git` on `PATH`: `cargo test --features git-integration-tests`.
 
 Agent integration:
 

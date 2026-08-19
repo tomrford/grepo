@@ -16,7 +16,7 @@ Current shape:
 
 ## Development Environment
 
-- Use `nix develop` for the toolchain.
+- Use rustup for the toolchain (stable Rust).
 - Build: `cargo build`
 - Test: `cargo test`
 - Full git-backed integration suite: `cargo test --features git-integration-tests`
