@@ -100,6 +100,7 @@ fn init_reports_existing_root_on_second_run() {
         )]
     );
 
+    fs::write(workspace.join(".repos/.gitignore"), "stale\n").unwrap();
     let second = run_for_test(workspace, cache_root, state_root, "git".into(), &["init"]).unwrap();
     assert_eq!(
         second.stdout(),
@@ -107,6 +108,84 @@ fn init_reports_existing_root_on_second_run() {
             "already initialized {}",
             root.path.join("workspace/.repos").display()
         )]
+    );
+    assert_eq!(
+        fs::read_to_string(root.path.join("workspace/.repos/.gitignore")).unwrap(),
+        "*\n!.lock\n"
+    );
+}
+
+#[test]
+fn init_creates_root_in_current_directory_inside_existing_project() {
+    let root = TestDir::new("init-nested");
+    let workspace = root.path.join("workspace");
+    let nested = workspace.join("nested");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(&nested).unwrap();
+
+    run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+    let report = run_for_test(
+        nested.clone(),
+        cache_root,
+        state_root,
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.stdout(),
+        &[format!("initialized {}", nested.join(".repos").display())]
+    );
+    assert!(workspace.join(".repos/.lock").is_file());
+    assert!(nested.join(".repos/.lock").is_file());
+}
+
+#[test]
+fn init_reuses_legacy_root_without_creating_modern_root() {
+    let root = TestDir::new("init-legacy");
+    let workspace = root.path.join("workspace");
+    let cache_root = root.path.join("cache");
+    let state_root = root.path.join("state");
+    fs::create_dir_all(workspace.join("grepo")).unwrap();
+    fs::write(workspace.join("grepo/.lock"), "[repos.existing]\n").unwrap();
+
+    let report = run_for_test(
+        workspace.clone(),
+        cache_root,
+        state_root,
+        "git".into(),
+        &["init"],
+    )
+    .unwrap();
+
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
+    assert_eq!(
+        report.stdout(),
+        &[format!(
+            "already initialized {}",
+            workspace.join("grepo").display()
+        )]
+    );
+    assert_eq!(
+        report.stderr(),
+        &[
+            "warning: using legacy grepo/ project directory; the default is now .repos/"
+                .to_string()
+        ]
+    );
+    assert!(!workspace.join(".repos").exists());
+    assert_eq!(
+        fs::read_to_string(workspace.join("grepo/.lock")).unwrap(),
+        "[repos.existing]\n"
     );
 }
 
@@ -1313,7 +1392,7 @@ fn legacy_grepo_directory_emits_warning() {
     fs::write(workspace.join("grepo/.lock"), "").unwrap();
 
     let report = run_for_test(workspace, cache_root, state_root, "git".into(), &["list"]).unwrap();
-    assert_eq!(report.exit_code(), ExitCode::from(1));
+    assert_eq!(report.exit_code(), ExitCode::SUCCESS);
     assert!(report.stdout().is_empty());
     assert_eq!(
         report.stderr(),
