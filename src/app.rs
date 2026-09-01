@@ -102,42 +102,49 @@ impl ProjectRoot {
         }
 
         for ancestor in start.ancestors() {
-            let modern_dir = ancestor.join(DEFAULT_PROJECT_DIR);
-            let lock_path = modern_dir.join(".lock");
-            if lock_path.is_file() {
-                return Some(DiscoveredRoot {
-                    root: Self {
-                        grepo_dir: modern_dir,
-                        lock_path,
-                    },
-                    warnings: Vec::new(),
-                });
-            }
-
-            let legacy_dir = ancestor.join(LEGACY_PROJECT_DIR);
-            let legacy_lock = legacy_dir.join(".lock");
-            if legacy_lock.is_file() {
-                return Some(DiscoveredRoot {
-                    root: Self {
-                        grepo_dir: legacy_dir,
-                        lock_path: legacy_lock,
-                    },
-                    warnings: vec![LEGACY_PROJECT_DIR_WARNING.into()],
-                });
+            if let Some(discovered) = Self::discover_at(ancestor, None) {
+                return Some(discovered);
             }
         }
         None
     }
 
+    fn discover_at(project_dir: &Path, dir_override: Option<&Path>) -> Option<DiscoveredRoot> {
+        if let Some(dir) = dir_override {
+            return Self::existing_at(resolve_project_dir_path(project_dir, dir)).map(|root| {
+                DiscoveredRoot {
+                    root,
+                    warnings: Vec::new(),
+                }
+            });
+        }
+
+        if let Some(root) = Self::existing_at(project_dir.join(DEFAULT_PROJECT_DIR)) {
+            return Some(DiscoveredRoot {
+                root,
+                warnings: Vec::new(),
+            });
+        }
+
+        Self::existing_at(project_dir.join(LEGACY_PROJECT_DIR)).map(|root| DiscoveredRoot {
+            root,
+            warnings: vec![LEGACY_PROJECT_DIR_WARNING.into()],
+        })
+    }
+
+    fn existing_at(grepo_dir: PathBuf) -> Option<Self> {
+        let lock_path = grepo_dir.join(".lock");
+        lock_path.is_file().then_some(Self {
+            grepo_dir,
+            lock_path,
+        })
+    }
+
     fn discover_named(start: &Path, dir: &Path) -> Option<ProjectRoot> {
         for ancestor in start.ancestors() {
             let grepo_dir = ancestor.join(dir);
-            let lock_path = grepo_dir.join(".lock");
-            if lock_path.is_file() {
-                return Some(Self {
-                    grepo_dir,
-                    lock_path,
-                });
+            if let Some(root) = Self::existing_at(grepo_dir) {
+                return Some(root);
             }
         }
         None
@@ -154,12 +161,16 @@ impl ProjectRoot {
         if !lock_path.exists() {
             write_atomic(&lock_path, "")?;
         }
-        write_atomic(&grepo_dir.join(".gitignore"), "*\n!.lock\n")?;
-
-        Ok(Self {
+        let root = Self {
             grepo_dir,
             lock_path,
-        })
+        };
+        root.write_gitignore()?;
+        Ok(root)
+    }
+
+    fn write_gitignore(&self) -> Result<()> {
+        write_atomic(&self.grepo_dir.join(".gitignore"), "*\n!.lock\n")
     }
 
     fn load_lockfile(&self) -> Result<Lockfile> {
@@ -309,7 +320,7 @@ fn skill() -> Result<RunReport> {
 }
 
 fn init(context: &AppContext) -> Result<RunReport> {
-    let discovered = ProjectRoot::discover(&context.cwd, context.project_dir.as_deref());
+    let discovered = ProjectRoot::discover_at(&context.cwd, context.project_dir.as_deref());
     let (root, existed, warnings) = match discovered {
         Some(discovered) => (discovered.root, true, discovered.warnings),
         None => (
@@ -319,6 +330,7 @@ fn init(context: &AppContext) -> Result<RunReport> {
         ),
     };
     let _lock = root.lock_mutation()?;
+    root.write_gitignore()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
     store.refresh_root(&context.git, &root.lock_path)?;
