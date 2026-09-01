@@ -309,16 +309,22 @@ fn skill() -> Result<RunReport> {
 }
 
 fn init(context: &AppContext) -> Result<RunReport> {
-    let dir = effective_project_dir(context);
-    let grepo_dir = resolve_project_dir_path(&context.cwd, &dir);
-    let existed = grepo_dir.join(".lock").is_file();
-    let root = ProjectRoot::create_at(&context.cwd, &dir)?;
+    let discovered = ProjectRoot::discover(&context.cwd, context.project_dir.as_deref());
+    let (root, existed, warnings) = match discovered {
+        Some(discovered) => (discovered.root, true, discovered.warnings),
+        None => (
+            ProjectRoot::create_at(&context.cwd, &effective_project_dir(context))?,
+            false,
+            Vec::new(),
+        ),
+    };
     let _lock = root.lock_mutation()?;
     let store = prepared_store(context)?;
     let _store_lock = store.lock_mutation()?;
     store.refresh_root(&context.git, &root.lock_path)?;
 
     let mut report = RunReport::success();
+    apply_warnings(&mut report, &warnings);
     let status = if existed {
         "already initialized"
     } else {
@@ -920,7 +926,7 @@ fn resolve_project_dir_path(project_dir: &Path, dir: &Path) -> PathBuf {
 
 fn apply_warnings(report: &mut RunReport, warnings: &[String]) {
     for warning in warnings {
-        report.warn_line(warning.clone());
+        report.advisory_line(warning.clone());
     }
 }
 

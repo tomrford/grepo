@@ -22,6 +22,10 @@ impl RunReport {
         self.stderr.push(format!("warning: {}", line.into()));
     }
 
+    pub fn advisory_line(&mut self, line: impl Into<String>) {
+        self.stderr.push(format!("warning: {}", line.into()));
+    }
+
     pub fn exit_code(&self) -> ExitCode {
         ExitCode::from(self.exit_code)
     }
