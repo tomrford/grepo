@@ -233,6 +233,23 @@ struct RealizedAlias {
     snapshot_path: PathBuf,
 }
 
+impl RealizedAlias {
+    fn status_line(&self, verb: &str) -> String {
+        let identity = match &self.entry {
+            LockEntry::Git(entry) => format!(
+                "commit {}",
+                entry.commit.as_deref().expect("realized Git commit")
+            ),
+            LockEntry::Tarball(entry) => format!("sha256 {}", entry.sha256),
+        };
+        format!(
+            "{verb} {}: {identity}; cache {}",
+            self.entry.alias(),
+            self.snapshot_path.display()
+        )
+    }
+}
+
 impl TryFrom<CliCommand> for Command {
     type Error = GrepoError;
 
@@ -378,11 +395,7 @@ fn add(context: &AppContext, args: AddCommand) -> Result<RunReport> {
     } else {
         "added"
     };
-    report.stdout_line(format!(
-        "{verb} {} -> {}",
-        realized.entry.alias(),
-        realized.snapshot_path.display()
-    ));
+    report.stdout_line(realized.status_line(verb));
     Ok(report)
 }
 
@@ -502,11 +515,7 @@ fn sync(context: &AppContext) -> Result<RunReport> {
                         if realized.entry != entry {
                             dirty_lock = true;
                         }
-                        report.stdout_line(format!(
-                            "synced {} -> {}",
-                            realized.entry.alias(),
-                            realized.snapshot_path.display()
-                        ));
+                        report.stdout_line(realized.status_line("synced"));
                     }
                     Err(error) => report.warn_line(format!("failed to sync {alias}: {error}")),
                 }
@@ -594,11 +603,7 @@ fn update(
                         if realized.entry != entry {
                             dirty_lock = true;
                         }
-                        report.stdout_line(format!(
-                            "updated {} -> {}",
-                            realized.entry.alias(),
-                            realized.snapshot_path.display()
-                        ));
+                        report.stdout_line(realized.status_line("updated"));
                     }
                     Err(error) => report.warn_line(format!("failed to update {alias}: {error}")),
                 }
@@ -1039,6 +1044,23 @@ pub(crate) fn run_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tarball_status_labels_checksum_and_cache() {
+        let realized = RealizedAlias {
+            entry: LockEntry::Tarball(TarballLockEntry {
+                alias: "clap".into(),
+                source: "cargo:clap@4.6.1".into(),
+                url: "https://example.invalid/clap.tar.gz".into(),
+                sha256: "abc123".into(),
+            }),
+            snapshot_path: PathBuf::from("/cache/tarballs/abc123"),
+        };
+        assert_eq!(
+            realized.status_line("added"),
+            "added clap: sha256 abc123; cache /cache/tarballs/abc123"
+        );
+    }
 
     #[test]
     fn build_entry_tracks_plain_npm_specs() {

@@ -54,8 +54,16 @@ fn add_creates_root_and_eagerly_syncs_default_branch() {
     )
     .unwrap();
     assert_eq!(report.exit_code(), std::process::ExitCode::SUCCESS);
-    assert_eq!(report.stdout().len(), 1);
-    assert!(report.stdout()[0].starts_with("added docs -> "));
+    assert_eq!(
+        report.stdout(),
+        &[format!(
+            "added docs: commit {}; cache {}",
+            git_output(Some(&seed), &["rev-parse", "HEAD"]),
+            fs::read_link(workspace.join(".repos/docs"))
+                .unwrap()
+                .display()
+        )]
+    );
 
     let lockfile = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
     assert!(lockfile.contains("[repos.docs]"));
@@ -371,7 +379,7 @@ fn add_rejects_existing_alias_without_force_and_force_replaces_it() {
     .unwrap();
     assert_eq!(report.exit_code(), ExitCode::SUCCESS);
     assert_eq!(report.stdout().len(), 1);
-    assert!(report.stdout()[0].starts_with("replaced docs -> "));
+    assert!(report.stdout()[0].starts_with("replaced docs: commit "));
     assert_eq!(
         fs::read_to_string(
             fs::canonicalize(workspace.join(".repos/docs"))
@@ -397,6 +405,7 @@ fn update_specific_alias_changes_only_targeted_entry() {
 
     seed_remote_repo(&remote_a, &seed_a, "a.txt", "v1\n");
     seed_remote_repo(&remote_b, &seed_b, "b.txt", "v1\n");
+    let original_commit = git_output(Some(&seed_a), &["rev-parse", "HEAD"]);
 
     run_for_test(
         workspace.clone(),
@@ -433,6 +442,20 @@ fn update_specific_alias_changes_only_targeted_entry() {
     );
     git(Some(&seed_a), &["push"]);
 
+    let synced = run_for_test(
+        workspace.clone(),
+        cache_root.clone(),
+        state_root.clone(),
+        "git".into(),
+        &["sync"],
+    )
+    .unwrap();
+    assert_eq!(synced.exit_code(), ExitCode::SUCCESS);
+    assert!(synced.stdout().contains(&format!(
+        "synced a: commit {original_commit}; cache {}",
+        fs::read_link(workspace.join(".repos/a")).unwrap().display()
+    )));
+
     let before_b = fs::read_to_string(
         fs::canonicalize(workspace.join(".repos/b"))
             .unwrap()
@@ -463,6 +486,14 @@ fn update_specific_alias_changes_only_targeted_entry() {
     .unwrap();
     assert_eq!(after_a, "v2\n");
     assert_eq!(before_b, after_b);
+    assert_eq!(
+        report.stdout(),
+        &[format!(
+            "updated a: commit {}; cache {}",
+            git_output(Some(&seed_a), &["rev-parse", "HEAD"]),
+            fs::read_link(workspace.join(".repos/a")).unwrap().display()
+        )]
+    );
 }
 
 #[test]
@@ -521,7 +552,7 @@ fn sync_warns_on_path_collision_and_continues_other_aliases() {
         report
             .stdout()
             .iter()
-            .any(|line| line.starts_with("synced b -> "))
+            .any(|line| line.starts_with("synced b: commit "))
     );
 }
 
@@ -1229,7 +1260,7 @@ fn update_warns_on_path_collision_and_keeps_failed_alias_pinned_to_old_commit() 
         report
             .stdout()
             .iter()
-            .any(|line| line.starts_with("updated b -> "))
+            .any(|line| line.starts_with("updated b: commit "))
     );
 
     let lock_after = fs::read_to_string(workspace.join(".repos/.lock")).unwrap();
@@ -1312,7 +1343,7 @@ fn add_repairs_half_initialized_remote_cache() {
     )
     .unwrap();
     assert_eq!(report.exit_code(), ExitCode::SUCCESS);
-    assert!(report.stdout()[0].starts_with("added docs -> "));
+    assert!(report.stdout()[0].starts_with("added docs: commit "));
     assert_eq!(
         git_output(
             None,
